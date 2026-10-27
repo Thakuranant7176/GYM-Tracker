@@ -9,3 +9,73 @@
 .date-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; }
 .date-actions button { white-space: nowrap; }
 @media (max-width: 560px) { .date-actions { width: 100%; } .date-actions button { flex: 1 1 auto; } }
+
+/* Phone-first refinements: preserve touch targets and scroll dense data instead of
+   shrinking controls into unusable columns. */
+@media (max-width: 760px) {
+  html, body, #root { max-width: 100%; overflow-x: hidden; }
+  .sidebar { width: min(86vw, 320px); padding: calc(18px + env(safe-area-inset-top)) 14px calc(18px + env(safe-area-inset-bottom)); }
+  .main-content { padding: 0 14px calc(32px + env(safe-area-inset-bottom)); }
+  .topbar { min-height: 78px; gap: 10px; }
+  .topbar > div:first-of-type { min-width: 0; }
+  .topbar h1 { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .menu-button { width: 44px; height: 44px; flex: 0 0 44px; display: grid; place-items: center; border-radius: 10px; background: #fff; border: 1px solid var(--line); }
+  .today-banner, .calendar-card, .chart-card, .list-card, .settings-section, .form-card { border-radius: 15px; }
+  .today-banner { padding: 20px; }
+  .today-banner .primary { width: 100%; min-height: 46px; }
+  .section-heading { gap: 12px; }
+  .section-heading h2, .today-banner h2, .form-card h2, .chart-card h2, .settings-section h2 { font-size: 20px; }
+  .stat-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+  .stat-card { min-height: 134px; padding: 15px; }
+  .stat-card strong { font-size: 19px; overflow-wrap: anywhere; }
+  .quick-actions { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+  .quick-actions button { min-height: 64px; padding: 12px 8px; font-size: 13px; }
+  .heatmap-scroll { margin: 0 -5px; padding: 0 5px 12px; overscroll-behavior-inline: contain; -webkit-overflow-scrolling: touch; }
+  .heatmap-legend { justify-content: flex-start; }
+  .date-meta { align-items: flex-start; flex-wrap: wrap; white-space: normal; }
+  .date-actions { width: 100%; }
+  .date-actions button { min-height: 42px; }
+  .primary, .secondary, .danger-button { min-height: 44px; }
+  input, select, textarea { font-size: 16px; }
+  .list-row { align-items: flex-start; }
+  .list-row > div:first-child { min-width: 0; }
+  .list-row span { overflow-wrap: anywhere; }
+  .row-actions { flex: 0 0 auto; }
+  .chart-card { overflow: hidden; }
+  .set-table { overflow-x: auto; overscroll-behavior-inline: contain; -webkit-overflow-scrolling: touch; }
+  .set-row { min-width: 535px; grid-template-columns: 48px 1fr 1fr 94px 47px 36px; padding: 9px 12px; }
+  .set-row input, .set-row select { min-height: 40px; font-size: 16px; }
+  .set-head { min-height: 34px; }
+  .set-head span { font-size: 10px; }
+  .complete-toggle, .remove-set { min-width: 40px; min-height: 40px; }
+  .exercise-log-heading { align-items: flex-start; flex-direction: column; }
+  .exercise-log-heading .small-button { min-height: 40px; }
+  .rest-timer { justify-content: space-between; min-height: 48px; }
+  .rest-timer button { min-height: 34px; padding: 7px 9px; }
+  .timer-controls { display: grid; grid-template-columns: 1fr 1fr; }
+  .timer-controls .danger-button { grid-column: 1 / -1; }
+  .finish-workout .primary { width: 100%; }
+  .routine-card { min-height: auto; }
+  .routine-card .primary { width: 100%; min-height: 46px; }
+  .profile-list { display: grid; }
+  .gym-chip { min-width: 0; width: 100%; }
+  .management-list > div, .plan-items > div { align-items: center; }
+  .management-list span, .plan-items span { min-width: 0; overflow-wrap: anywhere; }
+  .danger-actions { width: 100%; display: grid; grid-template-columns: 1fr 1fr; }
+  .danger-actions .danger-button { grid-column: 1 / -1; }
+  .toast { top: calc(12px + env(safe-area-inset-top)); max-width: none; }
+}
+
+@media (max-width: 390px) {
+  .main-content { padding-inline: 12px; }
+  .topbar h1 { font-size: 19px; }
+  .stat-grid, .quick-actions { grid-template-columns: 1fr; }
+  .stat-card { min-height: 118px; }
+  .section-heading { flex-direction: column; }
+  .date-select { width: 100%; }
+  .timer-controls, .danger-actions { grid-template-columns: 1fr; }
+  .timer-controls .danger-button { grid-column: auto; }
+  .form-grid, .compact-form, .settings-form, .inline-form, .two-input { grid-template-columns: 1fr; }
+  .triple-input { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .triple-input input { padding-inline: 7px; }
+}
