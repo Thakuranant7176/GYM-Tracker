@@ -14,7 +14,7 @@ Status is based on source inspection and tests available in the current review, 
 
 ## P1 — Recommended polish
 
-- [ ] Verify the dashboard heatmap visually at mobile and desktop widths with real saved entries.
+- [ ] Verify the deployed dashboard heatmap visually at mobile and desktop widths with real saved entries, including a phone that reports an approximately 800 px CSS viewport.
 - [ ] Test exports with empty and populated records; verify CSV contains enough labels to distinguish record types.
 - [ ] Consider syncing unfinished strength-workout drafts to the cloud if cross-device recovery of an in-progress workout becomes a requirement; current draft recovery is local to the device/browser.
 

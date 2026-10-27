@@ -79,3 +79,54 @@
   .triple-input { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .triple-input input { padding-inline: 7px; }
 }
+
+/* Some Android handsets expose an 800 px CSS viewport.  The original 760 px
+   breakpoint left those phones in the desktop shell, which is unusable once
+   the fixed sidebar has taken 245 px.  Carry the compact layout through 960 px. */
+@media (min-width: 761px) and (max-width: 960px) {
+  html, body, #root { max-width: 100%; overflow-x: hidden; }
+  .sidebar { width: min(86vw, 320px); padding: calc(18px + env(safe-area-inset-top)) 14px calc(18px + env(safe-area-inset-bottom)); transform: translateX(-105%); box-shadow: 10px 0 30px #30363320; transition: transform .2s ease; }
+  .sidebar.open { transform: translateX(0); }
+  .backdrop { display: block; position: fixed; inset: 0; border: 0; background: #30363335; z-index: 10; }
+  .main-content { margin-left: 0; padding: 0 14px calc(32px + env(safe-area-inset-bottom)); }
+  .topbar { min-height: 78px; gap: 10px; }
+  .topbar > div:first-of-type { min-width: 0; }
+  .topbar h1 { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .menu-button { width: 44px; height: 44px; flex: 0 0 44px; display: grid; place-items: center; border-radius: 10px; background: #fff; border: 1px solid var(--line); }
+  .sync-state { display: none; }
+  .today-banner { align-items: flex-start; flex-direction: column; padding: 20px; }
+  .today-banner .primary { width: 100%; min-height: 46px; }
+  .stat-grid, .quick-actions { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+  .stat-card { min-height: 134px; padding: 15px; }
+  .stat-card strong { font-size: 19px; overflow-wrap: anywhere; }
+  .quick-actions button { min-height: 64px; padding: 12px 8px; font-size: 13px; }
+  .two-column, .two-column.lower, .report-grid, .management-grid, .routine-grid { grid-template-columns: 1fr; }
+  .calendar-card, .chart-card, .list-card, .settings-section, .form-card { padding: 18px; border-radius: 15px; }
+  .section-heading, .chart-header { align-items: flex-start; }
+  .date-detail, .workout-top-actions, .danger-zone { align-items: flex-start; flex-direction: column; }
+  .date-meta { width: 100%; align-items: flex-start; flex-wrap: wrap; white-space: normal; }
+  .date-actions { width: 100%; }
+  .date-actions button { min-height: 42px; }
+  .form-card.sticky { position: static; }
+  .timer-card { display: flex; flex-direction: column; align-items: stretch; gap: 17px; }
+  .timer-controls { display: grid; grid-template-columns: 1fr 1fr; }
+  .timer-controls .danger-button { grid-column: 1 / -1; }
+  .inline-form, .form-grid, .compact-form, .settings-form, .two-input { grid-template-columns: 1fr 1fr; width: 100%; }
+  .triple-input { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .routine-editor { grid-template-columns: 1fr; }
+  .set-table { overflow-x: auto; overscroll-behavior-inline: contain; -webkit-overflow-scrolling: touch; }
+  .set-row { min-width: 535px; grid-template-columns: 48px 1fr 1fr 94px 47px 36px; padding: 9px 12px; }
+  .set-row input, .set-row select, input, select, textarea { font-size: 16px; }
+  .set-row input, .set-row select { min-height: 40px; }
+  .complete-toggle, .remove-set, .primary, .secondary, .danger-button { min-width: 40px; min-height: 44px; }
+  .heatmap-scroll { margin: 0 -5px; padding: 0 5px 12px; overscroll-behavior-inline: contain; -webkit-overflow-scrolling: touch; }
+  .heatmap-legend { justify-content: flex-start; }
+  .chart-card { overflow: hidden; }
+  .list-row { align-items: flex-start; }
+  .list-row > div:first-child, .management-list span, .plan-items span { min-width: 0; overflow-wrap: anywhere; }
+  .danger-actions { width: 100%; display: grid; grid-template-columns: 1fr 1fr; }
+  .danger-actions .danger-button { grid-column: 1 / -1; }
+  .date-select { width: 100%; }
+  .auth-card, .setup-card { padding: 27px 22px; }
+  .toast { top: calc(12px + env(safe-area-inset-top)); left: 15px; right: 15px; max-width: none; }
+}
