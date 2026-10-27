@@ -18,6 +18,7 @@ Gym Ledger is a private personal fitness tracker for use on a MacBook and Androi
 ## Design and product constraints
 
 - Light, minimal theme: warm off-white background (`#F8F7F4`), white surfaces, muted sage (`#8DAA91`), pale lavender/blue accents, charcoal text.
+- Phone layouts prioritise touch targets and controlled horizontal scrolling for the 52-week heatmap and dense workout-set table; they do not squeeze those controls into unusable columns.
 - Dashboard heatmap is the main screen, not a secondary chart.
 - Saturday is the default leg day; Sunday is rest.
 - Dates are intended to be handled in `Asia/Kolkata`.

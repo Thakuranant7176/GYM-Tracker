@@ -49,3 +49,13 @@ All dates use ISO format. Entries distinguish code changes from tests and extern
 
 ### Outstanding
 - Supabase authentication, real cloud writes, RLS isolation, and GitHub Pages deployment still require the user's configured project, credentials, and repository.
+
+## 2026-10-27 — Mobile usability pass
+
+### Added / changed
+- Reworked phone breakpoints for 760 px and 390 px widths with safe-area padding, a usable drawer width, 44 px minimum controls, 16 px form text to prevent Safari zoom, and adaptive dashboard/action grids.
+- Kept the 52-week heatmap and workout set table horizontally scrollable on a phone rather than compressing interactive cells and set inputs below usable widths.
+- Made dense mobile areas wrap safely: calendar actions, timers, lists, routine controls, gym cards, export/delete actions, and long text labels.
+
+### Validation
+- `pnpm typecheck`, `pnpm build`, and `pnpm lint` passed after the CSS changes. Lint continues to report three non-blocking React-effect advisories.
