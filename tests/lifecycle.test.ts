@@ -1,10 +1,6 @@
-/// <reference types="node" />
-
-import test from 'node:test';
-import assert from 'node:assert/strict';
+import test from 'node:test'
+import assert from 'node:assert/strict'
 import {
-  markWorkoutSessionEnded,
-  upsertWorkoutSession,
   clearDraft,
   describeActiveSession,
   draftStorageKey,
@@ -32,57 +28,6 @@ const memoryStorage = (): StorageLike & { data: Map<string, string> } => {
     },
   }
 }
-
-
-test('confirmed start immediately updates active session', () => {
-  const active = workout({
-    session_date: '2026-10-30',
-    status: 'in_progress',
-    title: 'Push',
-  });
-
-  const next = workout({
-    session_date: '2026-10-31',
-    status: 'in_progress',
-    title: 'Pull',
-  });
-
-  const updated = upsertWorkoutSession([active], next);
-
-  assert.equal(findActiveSession(updated)?.id, next.id);
-});
-
-test('confirmed discard immediately removes active session', () => {
-  const active = workout({
-    session_date: '2026-10-30',
-    status: 'in_progress',
-  });
-
-  const updated = markWorkoutSessionEnded(
-    [active],
-    active.id,
-    'discarded',
-  );
-
-  assert.equal(findActiveSession(updated), null);
-});
-
-test('completed workout remains in history', () => {
-  const active = workout({
-    session_date: '2026-10-30',
-    status: 'in_progress',
-  });
-
-  const updated = markWorkoutSessionEnded(
-    [active],
-    active.id,
-    'completed',
-  );
-
-  assert.equal(findActiveSession(updated), null);
-  assert.equal(updated[0].status, 'completed');
-});
-
 
 test('status decides completion; pre-migration rows fall back to the legacy flag', () => {
   assert.equal(isCompletedSession(workout({ session_date: '2026-10-30', status: 'completed' })), true)
@@ -189,4 +134,14 @@ test('clearing a draft and a storage that throws never break the workout', () =>
   assert.doesNotThrow(() => saveDraft(broken, USER, 'x', [], ''))
   assert.doesNotThrow(() => clearDraft(broken, USER))
   assert.equal(loadDraft(broken, USER, 'x'), null)
+})
+
+test('a draft saved by the previous version of the app (session stored as "active") is still restored', () => {
+  const storage = memoryStorage()
+  storage.setItem(draftStorageKey(USER), JSON.stringify({ active: { id: 'session-A', title: 'Push' }, drafts: [{ key: 'a', reps: 10 }], notes: 'old format' }))
+  assert.deepEqual(loadDraft(storage, USER, 'session-A')?.drafts, [{ key: 'a', reps: 10 }])
+  assert.equal(loadDraft(storage, USER, 'session-A')?.notes, 'old format')
+  assert.equal(loadDraft(storage, USER, 'session-B'), null) // still never applied to a different session
+  storage.setItem(draftStorageKey(USER), JSON.stringify({ active: null, drafts: [] }))
+  assert.equal(loadDraft(storage, USER, 'session-A'), null)
 })

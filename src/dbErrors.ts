@@ -22,3 +22,6 @@ export function describeDbError(error: NonNullable<DbError>, migration?: string)
   }
   return error.message
 }
+
+/** Postgres unique_violation (e.g. a second weight entry for the same date). */
+export const isUniqueViolation = (error: DbError) => Boolean(error && (error.code === '23505' || /duplicate key value/i.test(error.message)))

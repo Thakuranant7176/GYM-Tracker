@@ -1,5 +1,5 @@
 import { istDate } from './lib'
-import type { WorkoutPlan, WorkoutSession, WorkoutStatus } from './types'
+import type { WorkoutPlan, WorkoutSession } from './types'
 
 // ---------------------------------------------------------------------------
 // Workout lifecycle, client side.
@@ -35,32 +35,6 @@ export function findActiveSession(workouts: WorkoutSession[]): WorkoutSession | 
   return best
 }
 const startedKey = (session: WorkoutSession) => `${session.started_at ?? session.created_at ?? ''}|${session.id}`
-
-export function upsertWorkoutSession(
-  workouts: WorkoutSession[],
-  session: WorkoutSession,
-): WorkoutSession[] {
-  return [
-    session,
-    ...workouts.filter((row) => row.id !== session.id),
-  ];
-}
-
-export function markWorkoutSessionEnded(
-  workouts: WorkoutSession[],
-  sessionId: string,
-  status: Extract<WorkoutStatus, 'completed' | 'discarded'>,
-): WorkoutSession[] {
-  return workouts.map((row) =>
-    row.id === sessionId
-      ? {
-          ...row,
-          status,
-          completed: status === 'completed',
-        }
-      : row,
-  );
-}
 
 export type ActiveSessionNotice = {
   /** The session began on an earlier Asia/Kolkata date than today. */
@@ -129,8 +103,11 @@ export function loadDraft<TDraft>(storage: StorageLike | null, userId: string, s
   try {
     const raw = storage.getItem(draftStorageKey(userId))
     if (!raw) return null
-    const parsed = JSON.parse(raw) as Partial<StoredDraft<TDraft>>
-    if (parsed.sessionId !== sessionId || !Array.isArray(parsed.drafts)) return null
+    // The previous version stored the whole session as `active`; read its id so someone who is
+    // mid-workout when this update arrives keeps the sets they have already typed in.
+    const parsed = JSON.parse(raw) as Partial<StoredDraft<TDraft>> & { active?: { id?: string } | null }
+    const storedId = parsed.sessionId ?? parsed.active?.id
+    if (storedId !== sessionId || !Array.isArray(parsed.drafts)) return null
     return { sessionId, drafts: parsed.drafts, notes: typeof parsed.notes === 'string' ? parsed.notes : '', savedAt: parsed.savedAt ?? '' }
   } catch {
     return null

@@ -300,4 +300,7 @@ grant execute on function public.start_workout(uuid, date, text) to authenticate
 grant execute on function public.complete_workout(uuid, text, jsonb) to authenticated;
 grant execute on function public.discard_workout(uuid) to authenticated;
 
+-- Make the API pick up the new table/functions immediately instead of waiting for its schema cache.
+notify pgrst, 'reload schema';
+
 commit;

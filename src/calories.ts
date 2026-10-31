@@ -15,13 +15,31 @@ export const MET = {
   treadmillFallback: 5,
 } as const
 
-/** Treadmill speeds above this are treated as a data-entry error, not an estimate input. */
+/** Treadmill and walking speeds above this are treated as a data-entry error, not an estimate input. */
 export const MAX_PLAUSIBLE_TREADMILL_KMH = 25
+/** Cycling speeds above this are treated as a data-entry error. */
+export const MAX_PLAUSIBLE_CYCLING_KMH = 60
+
+/**
+ * Cycling MET by average speed, from the Compendium of Physical Activities (2011):
+ * under 10 mph 4.0, 10–11.9 mph 6.8, 12–13.9 mph 8.0, 14–15.9 mph 10.0, 16–19 mph 12.0, over 19 mph 15.8.
+ * Each entry is [upper bound in km/h (exclusive), MET].
+ */
+export const CYCLING_MET_BANDS: ReadonlyArray<readonly [number, number]> = [
+  [16.1, 4.0],
+  [19.3, 6.8],
+  [22.5, 8.0],
+  [25.7, 10.0],
+  [32.2, 12.0],
+  [Number.POSITIVE_INFINITY, 15.8],
+]
+export const cyclingMetForSpeed = (speedKmh: number) => (CYCLING_MET_BANDS.find(([upper]) => speedKmh < upper) ?? CYCLING_MET_BANDS[CYCLING_MET_BANDS.length - 1])[1]
 
 export const CALORIE_METHODOLOGY_LIST = [
   'Exercise calories are ACTIVE (net) calories: energy above resting, estimated as (MET − 1) × 3.5 × body weight (kg) ÷ 200 per minute. Resting energy is already part of maintenance, so it is not counted again.',
   'Treadmill sessions use the ACSM walking equation (speeds up to 8 km/h) or running equation (faster), driven by recorded speed — or distance ÷ time — and incline. A treadmill session with neither is estimated at a conservative fixed 5 MET and is labelled "assumed intensity".',
-  'Cycling uses 6.8 MET and walking 3.5 MET as fixed assumptions. Other cardio uses the machine-reported calories if one was entered, otherwise it is left out and counted as "unavailable".',
+  'Walking with a recorded distance (or speed) uses the same ACSM equation at that speed; with time only it is estimated at a fixed 3.5 MET ("assumed intensity"). Cycling with a recorded distance (or speed) uses the Compendium of Physical Activities MET for that average speed (4.0 under 16 km/h up to 15.8 above 32 km/h); with time only it is estimated at a fixed 6.8 MET ("assumed intensity").',
+  'Other cardio uses the machine-reported calories if one was entered, otherwise it is left out and counted as "unavailable".',
   'Strength training uses 3.5 MET for the session duration, only when the completed session has a reliable duration (derived from start and finish times; sessions left open for over 4 hours have no duration). Sets, reps and loads are NOT turned into calories — they do not support a defensible figure.',
   'Double counting is prevented by (1) estimating each workout session once, never again per set, (2) estimating each cardio record once, and (3) subtracting any strength time that overlaps a recorded cardio interval.',
   'Body weight is the most recent weigh-in on or before the day; if none exists the starting weight from your goals is used and flagged as such. Without a weight, no exercise estimate is made.',
@@ -97,27 +115,43 @@ export function acsmTreadmillMet(speedKmh: number, inclinePercent: number | null
   return Math.max(1, vo2 / 3.5)
 }
 
+/** The speed to use for a cardio record: recorded average speed, else distance ÷ active time, else none. */
+export function cardioSpeedKmh(session: Pick<CardioSession, 'average_speed_kmh' | 'distance_km' | 'active_seconds'>): number | null {
+  if (session.average_speed_kmh != null && Number(session.average_speed_kmh) > 0) return Number(session.average_speed_kmh)
+  if (session.distance_km != null && Number(session.distance_km) > 0 && session.active_seconds > 0) {
+    return Number(session.distance_km) / (session.active_seconds / 3600)
+  }
+  return null
+}
+
 export function estimateCardioActiveCalories(session: CardioSession, weightKg: number | null): ExerciseEstimate {
   if (!weightKg || weightKg <= 0) return { calories: null, method: 'Body weight is required for an active-calorie estimate', confidence: 'unavailable' }
   if (!(session.active_seconds > 0)) return { calories: null, method: 'Session has no active duration', confidence: 'unavailable' }
-  if (session.activity_type === 'treadmill') {
-    const hours = session.active_seconds / 3600
-    const derivedSpeed = session.distance_km != null && Number(session.distance_km) > 0 ? Number(session.distance_km) / hours : null
-    const speedKmh = session.average_speed_kmh != null && Number(session.average_speed_kmh) > 0 ? Number(session.average_speed_kmh) : derivedSpeed
+  const speedKmh = cardioSpeedKmh(session)
+  if (session.activity_type === 'treadmill' || session.activity_type === 'walking') {
+    const treadmill = session.activity_type === 'treadmill'
     if (speedKmh == null) {
-      return { calories: activeCaloriesFromMet(MET.treadmillFallback, weightKg, session.active_seconds), method: 'Assumed intensity: no speed or distance recorded (5 MET)', confidence: 'assumed_intensity' }
+      return treadmill
+        ? { calories: activeCaloriesFromMet(MET.treadmillFallback, weightKg, session.active_seconds), method: 'Assumed intensity: no speed or distance recorded (5 MET)', confidence: 'assumed_intensity' }
+        : { calories: activeCaloriesFromMet(MET.walking, weightKg, session.active_seconds), method: 'Assumed intensity: brisk walking, time only (3.5 MET)', confidence: 'assumed_intensity' }
     }
     if (speedKmh > MAX_PLAUSIBLE_TREADMILL_KMH) {
-      return { calories: null, method: `Recorded treadmill speed (${speedKmh.toFixed(1)} km/h) is outside a plausible range`, confidence: 'unavailable' }
+      return { calories: null, method: `Recorded ${treadmill ? 'treadmill' : 'walking'} speed (${speedKmh.toFixed(1)} km/h) is outside a plausible range`, confidence: 'unavailable' }
     }
     return {
       calories: activeCaloriesFromMet(acsmTreadmillMet(speedKmh, session.incline_percent), weightKg, session.active_seconds),
-      method: 'ACSM treadmill equation from recorded speed/distance and incline',
+      method: treadmill ? 'ACSM treadmill equation from recorded speed/distance and incline' : 'ACSM walking equation from recorded distance/speed',
       confidence: 'speed_based',
     }
   }
-  if (session.activity_type === 'cycling') return { calories: activeCaloriesFromMet(MET.cycling, weightKg, session.active_seconds), method: 'Assumed intensity: moderate cycling (6.8 MET)', confidence: 'assumed_intensity' }
-  if (session.activity_type === 'walking') return { calories: activeCaloriesFromMet(MET.walking, weightKg, session.active_seconds), method: 'Assumed intensity: brisk walking (3.5 MET)', confidence: 'assumed_intensity' }
+  if (session.activity_type === 'cycling') {
+    if (speedKmh == null) return { calories: activeCaloriesFromMet(MET.cycling, weightKg, session.active_seconds), method: 'Assumed intensity: moderate cycling, time only (6.8 MET)', confidence: 'assumed_intensity' }
+    if (speedKmh > MAX_PLAUSIBLE_CYCLING_KMH) {
+      return { calories: null, method: `Recorded cycling speed (${speedKmh.toFixed(1)} km/h) is outside a plausible range`, confidence: 'unavailable' }
+    }
+    const met = cyclingMetForSpeed(speedKmh)
+    return { calories: activeCaloriesFromMet(met, weightKg, session.active_seconds), method: `Compendium cycling MET ${met} for an average of ${speedKmh.toFixed(1)} km/h`, confidence: 'speed_based' }
+  }
   if (session.machine_calories != null) return { calories: rounded(Number(session.machine_calories)), method: 'Machine-reported calories (active/resting split unknown)', confidence: 'machine_reported' }
   return { calories: null, method: 'Other cardio needs a machine-calorie reading to be estimated', confidence: 'unavailable' }
 }
@@ -170,6 +204,34 @@ export function estimateStrengthActiveCalories(session: WorkoutSession, weightKg
   }
 }
 
+export type IntakeSummary = {
+  foodCalories: number
+  foodEntryCount: number
+  quickAddCalories: number
+  quickAddEntryCount: number
+  /** null = nothing recorded for the date (NOT zero). */
+  total: number | null
+}
+
+/**
+ * Calorie intake for one date: detailed food entries + manual quick-add entries.
+ * The dashboard ring, the Nutrition page, the day-detail panel and the monthly report all use
+ * this, so they cannot disagree. A date with neither kind of entry is `null`, not 0.
+ */
+export function intakeForDate(date: string, foods: FoodEntry[], quickEntries: CalorieIntakeEntry[]): IntakeSummary {
+  const foodForDay = uniqueById(foods).filter((entry) => entry.entry_date === date)
+  const quickForDay = uniqueById(quickEntries).filter((entry) => entry.entry_date === date)
+  const foodCalories = foodForDay.reduce((sum, entry) => sum + Number(entry.calories), 0)
+  const quickAddCalories = quickForDay.reduce((sum, entry) => sum + Number(entry.calories), 0)
+  return {
+    foodCalories,
+    foodEntryCount: foodForDay.length,
+    quickAddCalories,
+    quickAddEntryCount: quickForDay.length,
+    total: foodForDay.length > 0 || quickForDay.length > 0 ? foodCalories + quickAddCalories : null,
+  }
+}
+
 export function calculateDailyCalories({
   date,
   profile,
@@ -188,12 +250,7 @@ export function calculateDailyCalories({
   workouts: WorkoutSession[]
 }): DailyCalories {
   const weight = weightInfoForDate(date, weights, profile)
-  const foodForDay = uniqueById(foods).filter((entry) => entry.entry_date === date)
-  const quickForDay = uniqueById(quickEntries).filter((entry) => entry.entry_date === date)
-  const foodCalories = foodForDay.reduce((sum, entry) => sum + Number(entry.calories), 0)
-  const quickAddCalories = quickForDay.reduce((sum, entry) => sum + Number(entry.calories), 0)
-  const hasIntake = foodForDay.length > 0 || quickForDay.length > 0
-  const intakeCalories = hasIntake ? foodCalories + quickAddCalories : null
+  const { foodCalories, foodEntryCount, quickAddCalories, quickAddEntryCount, total: intakeCalories } = intakeForDate(date, foods, quickEntries)
 
   // Each cardio record and each completed workout session is estimated exactly once,
   // and it is attributed to its session_date (the Asia/Kolkata date it STARTED).
@@ -219,9 +276,9 @@ export function calculateDailyCalories({
     weightKg: weight.kg,
     weightSource: weight.source,
     foodCalories,
-    foodEntryCount: foodForDay.length,
+    foodEntryCount,
     quickAddCalories,
-    quickAddEntryCount: quickForDay.length,
+    quickAddEntryCount,
     intakeCalories,
     exerciseCalories,
     cardioCalories,

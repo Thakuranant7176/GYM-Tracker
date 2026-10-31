@@ -1,3 +1,4 @@
+import type { AppData } from '../src/App'
 import type { CalorieIntakeEntry, CardioSession, Exercise, FoodEntry, Profile, WeightEntry, WorkoutPlan, WorkoutSession, WorkoutSet } from '../src/types'
 
 export const USER = '00000000-0000-4000-8000-000000000001'
@@ -74,3 +75,23 @@ export const set = (workout_session_id: string, patch: Partial<WorkoutSet> = {})
 })
 export const exercise = (id: string, name: string): Exercise => ({ id, name, primary_muscle: 'Chest', secondary_muscles: [], equipment_id: null, category: 'compound', tracking_type: 'weighted', instructions: null, default_sets: 3, default_rep_min: 8, default_rep_max: 12, archived: false })
 export const plan = (patch: Partial<WorkoutPlan> & { id: string; weekday: number }): WorkoutPlan => ({ name: 'Push', is_rest_day: false, notes: null, archived: false, ...patch })
+
+/** Seven weekly routines, none of them a rest day, so a test never depends on which weekday it runs. */
+export const weekPlans = (): WorkoutPlan[] => Array.from({ length: 7 }, (_, weekday) => plan({ id: `p${weekday}`, weekday, name: `Day ${weekday}` }))
+
+export const appData = (patch: Partial<AppData> = {}): AppData => ({
+  userId: USER,
+  profile: profile(),
+  weights: [weight('2026-10-25', 71)],
+  foods: [],
+  quickEntries: [],
+  cardio: [],
+  gyms: [],
+  equipment: [],
+  exercises: [exercise('ex-bench', 'Bench Press')],
+  plans: weekPlans(),
+  planExercises: weekPlans().map((item, index) => ({ id: `pe${index}`, workout_plan_id: item.id, exercise_id: 'ex-bench', position: 1, planned_sets: 3, rep_min: 8, rep_max: 10, target_seconds: null, notes: null })),
+  workouts: [],
+  sets: [],
+  ...patch,
+})

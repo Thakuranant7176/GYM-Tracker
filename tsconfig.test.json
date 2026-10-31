@@ -1,10 +1,16 @@
 {
   "compilerOptions": {
     "target": "es2023",
-    "lib": ["ES2023", "DOM"],
+    "lib": [
+      "ES2023",
+      "DOM"
+    ],
     "module": "esnext",
     "moduleResolution": "bundler",
-    "types": ["node"],
+    "types": [
+      "node",
+      "vite/client"
+    ],
     "skipLibCheck": true,
     "strict": true,
     "verbatimModuleSyntax": true,
@@ -13,17 +19,26 @@
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true,
     "outDir": ".test-build",
-    "rootDir": "."
+    "rootDir": ".",
+    "jsx": "react-jsx"
   },
   "include": [
     "src/types.ts",
     "src/lib.ts",
     "src/calories.ts",
+    "src/cardioForm.ts",
     "src/workoutLifecycle.ts",
     "src/monthlyReport.ts",
     "src/midnight.ts",
     "src/intake.ts",
+    "src/numbers.ts",
+    "src/foodForm.ts",
     "src/dbErrors.ts",
+    "src/visibility.ts",
+    "src/hooks.ts",
+    "src/fetchAll.ts",
+    "src/CalorieDashboard.tsx",
+    "src/App.tsx",
     "tests"
   ]
 }

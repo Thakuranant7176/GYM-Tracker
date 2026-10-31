@@ -2,6 +2,27 @@
 
 All dates use ISO format. Entries distinguish code changes from tests and external setup.
 
+## 2026-10-31 (follow-up) — Cardio options, full review pass, discrepancy fixes
+
+### Added
+- **Cardio logging with three options** (`src/cardioForm.ts`, rebuilt `CardioPage`): cycling (time, optional distance), treadmill (speed, incline, time — all required, 0 incline for flat) and walking (time, optional distance). Time is typed in minutes or taken from the live timer, which keeps its typed details through a refresh. History shows each session's details and an estimated calorie burn.
+- Calorie estimates for walking and cycling now use a recorded distance/speed (ACSM walking equation; Compendium cycling MET by average speed); time-only sessions keep the fixed, labelled assumptions.
+- `intakeForDate` (one definition of intake for the dashboard, Nutrition page, day detail and report); `src/numbers.ts`, `src/foodForm.ts`, `src/visibility.ts`; 77 more tests including server-render tests of the main screens (149 total).
+- Migrations now end with a PostgREST schema-cache reload so new functions are visible immediately.
+
+### Fixed (found in the review pass)
+- Cardio: the manual form could not record activity, speed or incline (they lived in the timer card and were shared invisibly); the timer header always said "Treadmill"; speed/incline were offered for cycling; editing overwrote `paused_seconds` and rounded the duration even when only notes changed; saving was not retry-safe.
+- Nutrition page: "Consumed", "Remaining" and the weekly chart ignored quick-add calories, so they disagreed with the dashboard ring. Quick-adds for any viewed date can now be listed and removed there. Days with nothing logged are no longer drawn as 0 kcal.
+- Day-detail panel: discarded and in-progress workouts were counted as "completed"; it now counts only finished workouts and shows that day's intake, exercise estimate and balance.
+- Progress page: "monthly consistency" divided month-to-date completions by planned days over a rolling 31 days (already in `cc5336b`); the training streak read 0 every morning until a workout was logged.
+- Food form accepted decimals the integer column rejects and had no upper bounds; weight form showed a raw database error for a second entry on the same date; both could double-submit. Food entries are inserted with a content-keyed id.
+- A comma-as-decimal rule briefly accepted "1,000" as 1.000 (caught by a test); a decimal comma now means one or two digits only.
+- Someone mid-workout when this update arrives keeps the sets already typed (the loader reads the previous version's draft format).
+
+### Validation
+- `tsc -b`: exit 0. `pnpm test`: 149 passed, 0 failed. The render tests were mutation-checked (each fix reverted → a test fails).
+- `pnpm build`, `pnpm lint`, the SQL migrations/functions/RLS, and any browser or live-database behaviour: still **not run**.
+
 ## 2026-10-31 — Calorie rings, daily balance, midnight rollover, monthly report, workout lifecycle
 
 Starting point: branch `gym`, last clean commit `cc5336b`, plus uncommitted work from an earlier AI that was interrupted by a usage limit. Inspection found that tree did not compile, that `App.tsx` had been reformatted wholesale (about 360 very long lines became about 3,900, so diffs against `cc5336b` are unreadable even with `-w`), and that the client called database objects (`start_workout`, `discard_workout`, a four-argument `complete_workout`, a `daily_calorie_totals` table, new `profiles` columns) that existed in no SQL file. The calorie dashboard and report modules from that work were kept in spirit but rewritten (the intake design read-modify-wrote a per-day total and let it silently override the food log; dates used the browser time zone).

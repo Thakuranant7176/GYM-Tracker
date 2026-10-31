@@ -42,3 +42,21 @@ export function createSubmissionTracker(makeId: () => string = newId) {
     },
   }
 }
+
+/**
+ * Like the submission tracker, for forms whose fields are not all wired to a reset: the id is tied to a
+ * fingerprint of the content being saved. Saving the same content again (a retry, a double tap) reuses the
+ * id, so the database can ignore the repeat; different content gets a new id; `reset()` after success.
+ */
+export function createContentTracker(makeId: () => string = newId) {
+  let last: { fingerprint: string; id: string } | null = null
+  return {
+    idFor: (fingerprint: string) => {
+      if (!last || last.fingerprint !== fingerprint) last = { fingerprint, id: makeId() }
+      return last.id
+    },
+    reset: () => {
+      last = null
+    },
+  }
+}

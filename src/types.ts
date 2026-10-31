@@ -54,4 +54,8 @@ export interface TimerState {
   pausedSeconds: number
   startedAt: string | null
   createdAt: string
+  /** Stable id for this session, so saving it twice (retry, double tap) cannot create two rows. */
+  sessionId?: string
+  /** Detail fields typed while the timer runs, kept so a page refresh does not lose them. */
+  details?: { speed: string; incline: string; distance: string; notes: string }
 }

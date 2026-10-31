@@ -108,4 +108,7 @@ revoke all on function public.set_daily_intake_total(uuid, date, integer, text) 
 revoke execute on function public.set_daily_intake_total(uuid, date, integer, text) from anon;
 grant execute on function public.set_daily_intake_total(uuid, date, integer, text) to authenticated;
 
+-- Make the API pick up the new table/functions immediately instead of waiting for its schema cache.
+notify pgrst, 'reload schema';
+
 commit;

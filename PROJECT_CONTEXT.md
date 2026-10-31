@@ -37,10 +37,11 @@ Gym Ledger is a private personal fitness tracker for use on a MacBook and Androi
 - `src/intake.ts`: validation of manual calorie entries and the retry/idempotency key tracker.
 - `src/monthlyReport.ts`: builds the monthly report (JSON structure + Markdown rendering). Format is documented in `docs/MONTHLY_REPORT_FORMAT.md`.
 - `src/workoutLifecycle.ts`: pure helpers for the database-authoritative workout lifecycle (active-session detection, stale-session description, draft storage).
-- `src/midnight.ts` / `src/hooks.ts`: the IST-midnight watcher (injectable clock, unit-tested) and the React hooks `useToday` / `useVisibleRefresh`.
+- `src/midnight.ts` / `src/visibility.ts` / `src/hooks.ts`: the IST-midnight watcher and the visible-refresh (cross-device sync) watcher, both with injectable clocks and unit-tested, plus the thin React hooks `useToday` / `useVisibleRefresh` that subscribe to them.
 - `src/dbErrors.ts`: recognises "migration not applied" database errors and names the migration file to run.
 - `src/fetchAll.ts`: paginated reads (PostgREST returns at most 1,000 rows per request).
-- `tests/*.test.ts`, `tsconfig.test.json`, `scripts/*.mjs`: unit tests (Node's built-in runner; `pnpm test`).
+- `src/cardioForm.ts`: the three cardio options (cycling, treadmill, walking), which fields each requires, validation that mirrors the database limits, and the display helpers. `src/foodForm.ts`: validation for the food form. `src/numbers.ts`: the shared, strict decimal parser (`parseDecimal`).
+- `tests/*.test.ts(x)`, `tsconfig.test.json`, `scripts/*.mjs`: unit tests and server-render tests (Node's built-in runner, no extra dependencies; `pnpm test`). The render tests draw the real screens with fixture data, with Supabase and CSS stubbed by `scripts/extensionless-hooks.mjs`.
 - `supabase/tests/lifecycle_and_intake.test.sql`: database/RLS checks to run by hand in Supabase (not yet executed; see TODO).
 - `src/supabase.ts`: reads public `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY`; no service-role key belongs in the browser.
 - `supabase/schema.sql`: schema for new projects, triggers, RLS policies, and account deletion function.
@@ -72,13 +73,29 @@ New users receive a profile from `handle_new_user()` on registration. Therefore 
 - **Legacy data (migration):** completed rows get `status = 'completed'`. Per user, the newest unfinished row created in the last 24 hours becomes `in_progress`; every other unfinished row becomes `discarded` (kept, not deleted). Rows that somehow share `in_progress` keep only the newest. A trigger lets an older client that only writes the boolean `completed` keep working.
 - **Before applying to a live database**, count unfinished legacy rows per user to know what the backfill will touch: `select user_id, count(*) from workout_sessions where completed = false group by 1;`
 
+## Cardio logging
+
+One form with three options (`src/cardioForm.ts`, used by `CardioPage`):
+
+| Option | Required | Optional |
+| --- | --- | --- |
+| Cycling | time (minutes) | distance (km) |
+| Treadmill | speed (km/h, 0.5–25), incline (%, 0–40; 0 for flat) and time | — |
+| Walking | time (minutes) | distance (km) |
+
+- **Time** is typed in minutes (1–720) or supplied by the live timer (runs through a refresh; paused time is not counted; asks before saving a timer over 4 hours). The date cannot be in the future.
+- **Retry-safe:** a new session is inserted with a client-generated id and `ON CONFLICT DO NOTHING` (the timer keeps its id across refreshes), so a double tap or a retry after a lost response cannot create two rows.
+- **Editing** never rewrites what you did not change: the duration is only updated if the minutes field changed, `paused_seconds`, start time, heart rate and machine calories are never touched, and details that no longer apply are cleared only when you change the activity.
+- Distances that imply an impossible speed (over 60 km/h cycling, over 25 km/h on foot) are rejected, and a comma decimal (`6,5`) is accepted while `1,000` is rejected as ambiguous.
+- History shows each session's recorded details and an estimated calorie burn (hover for the method). Older "other cardio" records keep their label and can still be edited or re-classified.
+
 ## Calorie model (all exercise and balance numbers are estimates)
 
 Everything lives in `src/calories.ts`; the dashboard, the monthly report and the tests call the same functions.
 
 - **Active (net) exercise calories** = (MET − 1) × 3.5 × body weight (kg) ÷ 200 per minute. Resting energy is already inside maintenance, so it is not counted again.
 - **Treadmill:** ACSM walking equation up to 8 km/h, running equation above, from recorded speed (or distance ÷ time) and incline. Neither recorded → fixed 5 MET, labelled "assumed intensity". Speeds over 25 km/h are rejected as data errors.
-- **Cycling** 6.8 MET, **walking** 3.5 MET (assumed intensity). **Other** cardio uses a machine-reported calorie value if entered, otherwise it is "unavailable".
+- **Cycling:** with a recorded distance (or speed) the Compendium of Physical Activities MET for that average speed (4.0 under 16 km/h, 6.8 to 19 km/h, 8.0 to 22.5, 10.0 to 25.7, 12.0 to 32, 15.8 above; over 60 km/h is rejected as a data error); time only → fixed 6.8 MET, labelled "assumed intensity". **Walking:** with a distance (or speed, and incline if an older record has one) the ACSM equation at that speed; time only → fixed 3.5 MET, "assumed intensity". **Other** cardio (older records only) uses a machine-reported calorie value if entered, otherwise it is "unavailable".
 - **Strength** 3.5 MET for the session duration, only when the completed session has a reliable duration. Sets/reps/loads are never converted to calories.
 - **Body weight:** latest weigh-in on or before the day; else the starting weight (flagged); else no estimate.
 - **No double counting:** each completed session and each cardio record is estimated once (never per set); rows with the same id count once; strength time overlapping recorded cardio intervals (merged first) is subtracted; discarded and in-progress sessions never count.
@@ -104,7 +121,7 @@ Everything lives in `src/calories.ts`; the dashboard, the monthly report and the
 5. For a new Supabase project, run `supabase/schema.sql` in the SQL editor. For a database created from an earlier version, run the applicable migration in `supabase/migrations/` after checking your current schema.
 6. Apply migrations in this order for an existing database: `20261027_setup_completed.sql`, `20261027_atomic_workout_completion.sql`, `20261029_workout_lifecycle.sql`, `20261029_calorie_tracking.sql`. A fresh project only needs `schema.sql`.
 7. Run `pnpm dev`, `pnpm typecheck`, `pnpm test`, and `pnpm build`.
-8. Until a migration is applied the app keeps working: it shows a "Database update needed" banner naming the file, and the affected controls explain what to run instead of failing silently.
+8. Until a migration is applied the app still loads and shows a "Database update needed" banner naming the missing file, and the affected controls explain what to run. Manual calories and the new goals need `20261029_calorie_tracking.sql`. **Starting a strength workout needs `20261029_workout_lifecycle.sql`**, because workouts are now started through the `start_workout` function; weight, food, cardio, history and reports keep working either way.
 
 ## Deployment notes
 
@@ -120,10 +137,10 @@ The repository contains a GitHub Pages workflow (below). The owner has also repo
 
 ## Verified state (2026-10-31, calorie rings / lifecycle work)
 
-- **Ran and passed:** `tsc -b` (the project's typecheck) exits 0; `pnpm test` (72 unit tests: dates/time zone, calorie formulas and rounding, missing-vs-zero, double-counting, intake validation and retry keys, midnight watcher timers/listeners, workout lifecycle helpers and drafts, monthly report contents and user-data boundaries).
+- **Ran and passed:** `tsc -b` (the project's typecheck) exits 0; `pnpm test` runs 149 tests, all passing: dates/time zone, calorie formulas and rounding, missing-vs-zero, double-counting, cardio option validation, food/number parsing, intake validation and retry keys, midnight and visible-refresh watchers (timers and listeners), workout lifecycle helpers and drafts, monthly report contents and user-data boundaries, and server-rendered screens (cardio, nutrition, day detail, rings, workout, dashboard, progress). The render tests were mutation-checked: deliberately reverting each fix made them fail.
 - **Not run (sandbox limits):** `pnpm build` and `pnpm lint` — the copied dependencies contain macOS ARM64 native bindings and the sandbox is Linux without network. Run them on the Mac.
 - **Never executed:** both new migrations, the SQL functions/trigger/index, and RLS for the new table. No Postgres engine or Supabase credentials were available. `supabase/tests/lifecycle_and_intake.test.sql` is written to check them and must be run in a scratch Supabase project.
-- **Not tested in a browser:** the rings' layout at 3/2/1 columns, the live midnight rollover, cross-device refresh, and the Add/Set forms against a real database. Live Supabase persistence/synchronisation is therefore **unverified**.
+- **Not tested in a browser:** the rings' and cardio options' layout at 3/2/1 columns, clicks and typing, the live midnight rollover, cross-device refresh, and every form against a real database. The render tests only draw each screen once from fixture data. Live Supabase persistence/synchronisation is therefore **unverified**.
 - The inherited uncommitted work did not compile (a missing brace in `App.tsx`, undeclared names, null-safety errors) and its client code called database objects that no SQL file created; both were repaired/replaced. `App.tsx` was also reformatted wholesale by the previous AI (about 3,900 lines, was ~360 very long lines, with quote/semicolon/comma changes throughout), so a plain, `-w` or word diff against `cc5336b` is not reviewable. Review it by feature (see the CHANGELOG list of what changed in `App.tsx`), or run the same formatter over the `cc5336b` version first and diff that.
 
 ## Verified state at handoff review (2026-10-27)

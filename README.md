@@ -17,6 +17,7 @@ Before changing this repository, read [AGENTS.md](AGENTS.md), [PROJECT_CONTEXT.m
 - A refresh-safe treadmill/cardio timer. Its in-progress state is stored locally only to survive a browser interruption; a completed session is written to Supabase and updates the heatmap.
 - Set-level strength logs, previous performance, personal records, estimated 1RM, volume reporting, rest timer, and an editable routine.
 - Three dashboard rings for today (Asia/Kolkata): estimated exercise calories burned (with a goal and a red→green progress colour), calories consumed (food log plus a manual "Add calories" / "Set day's total"), and the estimated daily deficit or surplus against a configurable maintenance estimate. They roll over at midnight without a refresh; earlier days are kept.
+- Cardio logging with three options: cycling (time, optional distance), treadmill (speed, incline and time) and walking (time, optional distance), by typing minutes or using a live timer. History shows each session's details and an estimated calorie burn.
 - A database-backed workout lifecycle: one active workout per user, restored on refresh and across devices, with confirmed discard.
 - A monthly report (Progress page): choose a month and year, download a readable Markdown report or structured JSON. See [docs/MONTHLY_REPORT_FORMAT.md](docs/MONTHLY_REPORT_FORMAT.md).
 - Editable gym, equipment, and exercise libraries. Archiving equipment or exercises preserves historical workout records.
@@ -108,6 +109,8 @@ Run this against a configured Supabase project before relying on the tracker:
 9. Add calories twice quickly and confirm one entry per tap; use *Set day's total* and confirm the food log is unchanged. Refresh and check another device shows the same totals.
 10. Leave the dashboard open across midnight IST (or temporarily change the device clock) and confirm the rings reset to the new day without a reload and yesterday's records remain.
 11. Download a monthly report for an empty month and a month with data; check that days without food entries appear as gaps, not zeros.
+12. Log one cardio session of each kind (cycling, treadmill with speed and incline, walking). Start the live timer, refresh the page and confirm it is still running, then finish it. Edit a session's notes only and confirm its duration did not change.
+13. Open the Nutrition page after using "Add calories" and confirm its "Consumed" figure matches the dashboard ring.
 
 The 2026-10-27 source passed a clean install, TypeScript check, production build, and lint run on the target Mac. The 2026-10-31 calorie-ring / lifecycle changes have so far passed only the TypeScript check and the unit tests (`pnpm test`); `pnpm build`, `pnpm lint`, the new migrations, and all live Supabase behaviour (RLS, persistence, cross-device sync) still must be run and verified against your configured project. See [PROJECT_CONTEXT.md](PROJECT_CONTEXT.md) for the exact verification status.
 

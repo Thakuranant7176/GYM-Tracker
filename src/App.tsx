@@ -3,6 +3,7 @@ import type { Session } from "@supabase/supabase-js";
 import {
   Activity,
   BarChart3,
+  Bike,
   CalendarDays,
   ChevronLeft,
   ChevronRight,
@@ -10,6 +11,8 @@ import {
   Clock3,
   Download,
   Dumbbell,
+  Footprints,
+  Gauge,
   LogOut,
   Menu,
   Pencil,
@@ -34,7 +37,34 @@ import {
 } from "recharts";
 import "./App.css";
 import { CalorieDashboard } from "./CalorieDashboard";
-import { describeDbError, isMissingSchemaError, MIGRATIONS } from "./dbErrors";
+import {
+  CARDIO_OPTIONS,
+  cardioDetails,
+  cardioLabel,
+  emptyCardioForm,
+  formFromSession,
+  sameDuration,
+  validateCardio,
+  type CardioField,
+  type CardioFormInput,
+  type CardioFormKind,
+} from "./cardioForm";
+import {
+  calculateDailyCalories,
+  describeBalance,
+  estimateCardioActiveCalories,
+  intakeForDate,
+  weightInfoForDate,
+} from "./calories";
+import {
+  describeDbError,
+  isMissingSchemaError,
+  isUniqueViolation,
+  MIGRATIONS,
+} from "./dbErrors";
+import { createContentTracker, createSubmissionTracker } from "./intake";
+import { validateFoodForm } from "./foodForm";
+import { parseDecimal } from "./numbers";
 import { fetchAllRows } from "./fetchAll";
 import { useToday, useVisibleRefresh } from "./hooks";
 import { buildMonthlyReport, monthlyReportMarkdown } from "./monthlyReport";
@@ -44,13 +74,12 @@ import {
   describeActiveSession,
   endedElsewhereMessage,
   findActiveSession,
+  isActiveSession,
   isCompletedSession,
   loadDraft,
   saveDraft,
   sessionDateFor,
   whyWorkoutEnded,
-  markWorkoutSessionEnded,
-  upsertWorkoutSession,
 } from "./workoutLifecycle";
 import { DEFAULT_PLAN, MUSCLES } from "./defaultPlan";
 import {
@@ -62,6 +91,7 @@ import {
   isoFromDate,
   minuteLabel,
   monthOf,
+  newId,
   number,
   sameWeek,
   shiftMonth,
@@ -593,20 +623,6 @@ function Tracker({ session }: { session: Session }) {
             refresh={refresh}
             inform={inform}
             initialDate={logDate}
-            onSessionStarted={(started) => {
-              loadSequence.current += 1;
-
-              setWorkouts((current) =>
-                upsertWorkoutSession(current, started),
-              );
-            }}
-            onSessionEnded={(sessionId, status) => {
-              loadSequence.current += 1;
-
-              setWorkouts((current) =>
-                markWorkoutSessionEnded(current, sessionId, status),
-              );
-            }}
           />
         )}
         {page === "progress" && (
@@ -1049,7 +1065,7 @@ function Dashboard({
         />
         <StatCard
           label="Food records today"
-          value={String(data.foods.filter((entry) => entry.entry_date === todayISO()).length)}
+          value={String(data.foods.filter((entry) => entry.entry_date === today).length)}
           detail="Detailed meals and macros"
           icon={<Utensils />}
         />
@@ -1073,13 +1089,13 @@ function Dashboard({
             </button>
             <button
               className="plain-button"
-              onClick={() => setCalendarEnd(todayISO())}
+              onClick={() => setCalendarEnd(today)}
             >
               Today
             </button>
             <button
               aria-label="Next period"
-              disabled={calendarEnd >= todayISO()}
+              disabled={calendarEnd >= today}
               onClick={() => setCalendarEnd(addDays(calendarEnd, 364))}
             >
               <ChevronRight size={19} />
@@ -1115,7 +1131,7 @@ function Dashboard({
         </button>
         <button onClick={() => setPage("cardio")}>
           <Clock3 />
-          Start treadmill
+          Log cardio
         </button>
       </section>
     </div>
@@ -1244,11 +1260,24 @@ function DateDetail({
   const daySessions = data.workouts.filter(
     (item) => item.session_date === date,
   );
-  const ids = new Set(daySessions.map((item) => item.id));
+  // Only finished workouts count as workouts: a discarded session never happened, and one still
+  // in progress is shown as such instead of being reported as "completed".
+  const completedSessions = daySessions.filter(isCompletedSession);
+  const inProgress = daySessions.some(isActiveSession);
+  const ids = new Set(completedSessions.map((item) => item.id));
   const daySets = data.sets.filter(
     (item) => ids.has(item.workout_session_id) && item.completed,
   );
   const dayCardio = data.cardio.filter((item) => item.session_date === date);
+  const energy = calculateDailyCalories({
+    date,
+    profile: data.profile,
+    weights: data.weights,
+    foods: data.foods,
+    quickEntries: data.quickEntries,
+    cardio: data.cardio,
+    workouts: data.workouts,
+  });
   const plan = data.plans.find((item) => item.weekday === weekday(date));
   const score = activityScore(
     date,
@@ -1271,11 +1300,25 @@ function DateDetail({
               : "No recorded activity"}
         </h3>
         <p>
-          {daySessions.length
-            ? `${daySessions.filter((item) => item.completed).length} completed strength session${daySessions.length === 1 ? "" : "s"} · ${daySets.length} completed sets`
-            : plan?.is_rest_day
-              ? "Rest is not counted as a missed workout."
-              : "No workout has been logged."}
+          {completedSessions.length
+            ? `${completedSessions.length} completed strength session${completedSessions.length === 1 ? "" : "s"} · ${daySets.length} completed sets`
+            : inProgress
+              ? "A strength workout is in progress."
+              : plan?.is_rest_day
+                ? "Rest is not counted as a missed workout."
+                : "No workout has been logged."}
+        </p>
+        <p className="muted">
+          {energy.intakeCalories == null
+            ? "Calorie intake not recorded"
+            : `${number(energy.intakeCalories)} kcal eaten`}
+          {" · "}
+          {energy.exerciseRecordCount
+            ? `≈ ${number(energy.exerciseCalories)} kcal exercise (est.)`
+            : "no exercise estimate"}
+          {energy.estimatedBalance != null
+            ? ` · ${number(Math.abs(energy.estimatedBalance))} kcal ${describeBalance(energy.estimatedBalance)} (est.)`
+            : ""}
         </p>
       </div>
       <div className="date-meta">
@@ -1332,29 +1375,42 @@ function WeightPage({
     ? averageWeek.reduce((sum, entry) => sum + entry.weight_kg, 0) /
       averageWeek.length
     : null;
+  const saving = useRef(false);
   const save = async (event: React.FormEvent) => {
     event.preventDefault();
-    const weight = Number(form.weight_kg);
-    if (!weight || weight < 20 || weight > 500)
-      return inform("error", "Enter a realistic weight in kilograms.");
+    if (saving.current) return;
+    const parsed = parseDecimal(form.weight_kg);
+    const weight = parsed.blank || parsed.value == null ? Number.NaN : parsed.value;
+    if (!(weight >= 20 && weight <= 500))
+      return inform("error", "Enter a realistic weight in kilograms (20–500).");
+    saving.current = true;
     setBusy(true);
-    const payload = {
-      entry_date: form.entry_date,
-      weight_kg: weight,
-      notes: form.notes || null,
-    };
-    const request = editing
-      ? supabase!.from("weight_entries").update(payload).eq("id", editing)
-      : supabase!
-          .from("weight_entries")
-          .insert({ ...payload, user_id: data.userId });
-    const { error } = await request;
-    setBusy(false);
-    if (error) return inform("error", error.message);
-    setForm(emptyWeight());
-    setEditing(null);
-    inform("success", "Weight entry saved.");
-    await refresh();
+    try {
+      const payload = {
+        entry_date: form.entry_date,
+        weight_kg: weight,
+        notes: form.notes || null,
+      };
+      const { error } = editing
+        ? await supabase!.from("weight_entries").update(payload).eq("id", editing)
+        : await supabase!
+            .from("weight_entries")
+            .insert({ ...payload, user_id: data.userId });
+      if (error)
+        return inform(
+          "error",
+          isUniqueViolation(error)
+            ? "You already have a weight entry for that date. Edit it from the list instead of adding a second one."
+            : error.message,
+        );
+      setForm(emptyWeight());
+      setEditing(null);
+      inform("success", "Weight entry saved.");
+      await refresh();
+    } finally {
+      saving.current = false;
+      setBusy(false);
+    }
   };
   const edit = (entry: WeightEntry) => {
     setEditing(entry.id);
@@ -1581,40 +1637,59 @@ function NutritionPage({
   const [editing, setEditing] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const entries = data.foods.filter((entry) => entry.entry_date === date);
+  // The same definition of "intake" as the dashboard ring: food log + manual quick-add.
+  const intake = intakeForDate(date, data.foods, data.quickEntries);
+  const quickForDate = data.quickEntries
+    .filter((entry) => entry.entry_date === date)
+    .sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""));
   const total = (
     field: keyof Pick<
       FoodEntry,
       "calories" | "protein_g" | "carbs_g" | "fat_g"
     >,
   ) => entries.reduce((sum, entry) => sum + Number(entry[field] ?? 0), 0);
+  // In-flight guard that works even if two taps land before React re-renders, plus an id tied to the
+  // content being saved: a retry of the same entry reuses it and the database ignores the repeat.
+  const saving = useRef(false);
+  const [tracker] = useState(() => createContentTracker());
   const save = async (event: React.FormEvent) => {
     event.preventDefault();
-    const calories = Number(form.calories);
-    if (!form.name.trim() || !Number.isFinite(calories) || calories < 0)
-      return inform("error", "Enter a food name and a valid calorie value.");
+    if (saving.current) return;
+    const check = validateFoodForm(form);
+    if (!check.ok) return inform("error", check.error);
+    saving.current = true;
     setBusy(true);
-    const payload = {
-      entry_date: form.entry_date,
-      name: form.name.trim(),
-      meal_type: form.meal_type,
-      calories,
-      protein_g: form.protein_g ? Number(form.protein_g) : null,
-      carbs_g: form.carbs_g ? Number(form.carbs_g) : null,
-      fat_g: form.fat_g ? Number(form.fat_g) : null,
-      notes: form.notes || null,
-    };
-    const request = editing
-      ? supabase!.from("food_entries").update(payload).eq("id", editing)
-      : supabase!
-          .from("food_entries")
-          .insert({ ...payload, user_id: data.userId });
-    const { error } = await request;
-    setBusy(false);
-    if (error) return inform("error", error.message);
-    setForm(emptyFood());
-    setEditing(null);
-    inform("success", "Food entry saved.");
-    await refresh();
+    try {
+      const payload = {
+        entry_date: form.entry_date,
+        name: check.name,
+        meal_type: form.meal_type,
+        calories: check.calories,
+        protein_g: check.protein_g,
+        carbs_g: check.carbs_g,
+        fat_g: check.fat_g,
+        notes: form.notes || null,
+      };
+      const { error } = editing
+        ? await supabase!.from("food_entries").update(payload).eq("id", editing)
+        : await supabase!.from("food_entries").upsert(
+            {
+              ...payload,
+              id: tracker.idFor(JSON.stringify(payload)),
+              user_id: data.userId,
+            },
+            { onConflict: "id", ignoreDuplicates: true },
+          );
+      if (error) return inform("error", error.message);
+      tracker.reset();
+      setForm(emptyFood());
+      setEditing(null);
+      inform("success", "Food entry saved.");
+      await refresh();
+    } finally {
+      saving.current = false;
+      setBusy(false);
+    }
   };
   const edit = (entry: FoodEntry) => {
     setEditing(entry.id);
@@ -1639,13 +1714,25 @@ function NutritionPage({
     inform("success", "Food entry deleted.");
     await refresh();
   };
+  const removeQuick = async (entry: CalorieIntakeEntry) => {
+    if (
+      !window.confirm(`Remove this ${number(entry.calories)} kcal quick-add entry?`)
+    )
+      return;
+    const { error } = await supabase!
+      .from("calorie_intake_entries")
+      .delete()
+      .eq("id", entry.id);
+    if (error) return inform("error", describeDbError(error, MIGRATIONS.calories));
+    inform("success", "Quick-add entry removed.");
+    await refresh();
+  };
+  // Days with nothing recorded stay empty (null) instead of drawing a misleading zero.
   const weekly = Array.from({ length: 7 }, (_, index) => {
     const day = addDays(startOfWeek(), index);
     return {
       day: formatDate(day, { weekday: "short" }),
-      calories: data.foods
-        .filter((entry) => entry.entry_date === day)
-        .reduce((sum, entry) => sum + entry.calories, 0),
+      calories: intakeForDate(day, data.foods, data.quickEntries).total,
     };
   });
   return (
@@ -1675,11 +1762,13 @@ function NutritionPage({
         <div className="stat-grid compact">
           <StatCard
             label="Consumed"
-            value={`${number(total("calories"))} kcal`}
+            value={
+              intake.total == null ? "Not logged" : `${number(intake.total)} kcal`
+            }
             detail={
-              entries.length
-                ? `${entries.length} logged item${entries.length === 1 ? "" : "s"}`
-                : "Nothing logged"
+              intake.total == null
+                ? "Nothing logged"
+                : `${intake.foodEntryCount} food item${intake.foodEntryCount === 1 ? "" : "s"}${intake.quickAddEntryCount ? ` + ${number(intake.quickAddCalories)} kcal quick-add` : ""}`
             }
             icon={<Utensils />}
           />
@@ -1687,12 +1776,12 @@ function NutritionPage({
             label="Remaining"
             value={
               data.profile.daily_calorie_target
-                ? `${number(data.profile.daily_calorie_target - total("calories"))} kcal`
+                ? `${number(data.profile.daily_calorie_target - (intake.total ?? 0))} kcal`
                 : "—"
             }
             detail={
               data.profile.daily_calorie_target
-                ? total("calories") > data.profile.daily_calorie_target
+                ? (intake.total ?? 0) > data.profile.daily_calorie_target
                   ? "Over target"
                   : "Against your target"
                 : "Set a target in Settings"
@@ -1719,7 +1808,7 @@ function NutritionPage({
         <section className="chart-card">
           <div className="chart-header">
             <h3>Calories this week</h3>
-            <span className="muted">Recorded values only</span>
+            <span className="muted">Food log + quick-add · days with nothing logged are blank</span>
           </div>
           <ResponsiveContainer width="100%" height={240}>
             <BarChart data={weekly}>
@@ -1788,6 +1877,36 @@ function NutritionPage({
             />
           )}
         </section>
+        {quickForDate.length > 0 && (
+          <section className="list-card">
+            <h3>Quick-add calories for {formatDate(date)}</h3>
+            <p className="muted">
+              Added from the dashboard’s “Add calories”. They are counted in
+              the total above, in addition to the meals.
+            </p>
+            <div className="data-list">
+              {quickForDate.map((entry) => (
+                <div className="list-row" key={entry.id}>
+                  <div>
+                    <strong>
+                      {number(entry.calories)} kcal
+                      {entry.source === "set" ? " (set total)" : ""}
+                    </strong>
+                    <span>{entry.note ?? "No note"}</span>
+                  </div>
+                  <div className="row-actions">
+                    <button
+                      aria-label={`Remove ${number(entry.calories)} kilocalorie quick-add entry`}
+                      onClick={() => void removeQuick(entry)}
+                    >
+                      <Trash2 size={16} />
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
       </section>
       <aside className="form-card sticky">
         <p className="eyebrow">{editing ? "Edit item" : "Manual entry"}</p>
@@ -1893,6 +2012,36 @@ function NutritionPage({
   );
 }
 
+const CARDIO_ICONS = { cycling: Bike, treadmill: Gauge, walking: Footprints };
+
+/** Reads a saved live timer, ignoring (and clearing) anything corrupt. Older timers get a session id. */
+function readStoredTimer(key: string): TimerState | null {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<TimerState> | null;
+    const valid =
+      parsed != null &&
+      (parsed.status === "running" || parsed.status === "paused") &&
+      typeof parsed.createdAt === "string" &&
+      typeof parsed.sessionDate === "string" &&
+      typeof parsed.activityType === "string" &&
+      typeof parsed.accumulatedSeconds === "number";
+    if (!valid) {
+      localStorage.removeItem(key);
+      return null;
+    }
+    return { ...(parsed as TimerState), sessionId: parsed.sessionId ?? newId() };
+  } catch {
+    try {
+      localStorage.removeItem(key);
+    } catch {
+      // storage unavailable
+    }
+    return null;
+  }
+}
+
 function CardioPage({
   data,
   today,
@@ -1909,21 +2058,44 @@ function CardioPage({
   // An explicit calendar date wins; otherwise "today" follows the Asia/Kolkata midnight.
   const initialDate = requestedDate ?? today;
   const key = `gym-ledger-timer-${data.userId}`;
-  const [timer, setTimer] = useState<TimerState | null>(null);
-  const [tick, setTick] = useState(0);
-  const [form, setForm] = useState({
-    activity_type: "treadmill",
-    session_date: initialDate,
-    active_minutes: "",
-    distance_km: "",
-    average_speed_kmh: "",
-    incline_percent: "",
-    heart_rate_bpm: "",
-    machine_calories: "",
-    notes: "",
+  const latest = data.cardio[0]?.activity_type;
+  const defaultKind: CardioFormKind =
+    latest === "cycling" || latest === "walking" ? latest : "treadmill";
+  const [timer, setTimer] = useState<TimerState | null>(() =>
+    readStoredTimer(key),
+  );
+  const [tick, setTick] = useState(() => Date.now());
+  const [form, setForm] = useState<CardioFormInput>(() => {
+    const stored = readStoredTimer(key);
+    const base = emptyCardioForm(initialDate, defaultKind);
+    return stored
+      ? {
+          ...base,
+          kind: stored.activityType,
+          date: stored.sessionDate,
+          speed: stored.details?.speed ?? "",
+          incline: stored.details?.incline ?? "",
+          distance: stored.details?.distance ?? "",
+          notes: stored.details?.notes ?? "",
+        }
+      : base;
   });
-  const [editing, setEditing] = useState<string | null>(null);
+  const [editing, setEditing] = useState<CardioSession | null>(null);
   const [busy, setBusy] = useState(false);
+  const [problem, setProblem] = useState<{
+    field: CardioField;
+    message: string;
+  } | null>(null);
+  // One id per distinct manual submission: a retry or double tap re-sends the same id and the
+  // database ignores the repeat; any change to the form starts a new submission.
+  const [submission] = useState(() => createSubmissionTracker());
+  const saving = useRef(false);
+  const logRef = useRef<HTMLElement | null>(null);
+  const change = (patch: Partial<CardioFormInput>) => {
+    setForm((current) => ({ ...current, ...patch }));
+    setProblem(null);
+    submission.reset();
+  };
   // If the form still holds the previous default day when midnight passes, move it to the
   // new day. A date the user chose on purpose is never touched.
   const previousDefault = useRef(initialDate);
@@ -1932,32 +2104,30 @@ function CardioPage({
     previousDefault.current = initialDate;
     if (before === initialDate) return;
     setForm((current) =>
-      current.session_date === before
-        ? { ...current, session_date: initialDate }
-        : current,
+      current.date === before ? { ...current, date: initialDate } : current,
     );
   }, [initialDate]);
+  // Keep the live timer, and the details typed while it runs, across refreshes.
   useEffect(() => {
     try {
-      const saved = localStorage.getItem(key);
-      if (saved) {
-        const restored = JSON.parse(saved) as TimerState;
-        setTimer(restored);
-        setTick(Date.now());
-        setForm((current) => ({
-          ...current,
-          activity_type: restored.activityType,
-          session_date: restored.sessionDate,
-        }));
-      }
+      if (timer)
+        localStorage.setItem(
+          key,
+          JSON.stringify({
+            ...timer,
+            details: {
+              speed: form.speed,
+              incline: form.incline,
+              distance: form.distance,
+              notes: form.notes,
+            },
+          }),
+        );
+      else localStorage.removeItem(key);
     } catch {
-      localStorage.removeItem(key);
+      // Storage may be full or disabled; the timer still works for this visit.
     }
-  }, [key]);
-  useEffect(() => {
-    if (timer) localStorage.setItem(key, JSON.stringify(timer));
-    else localStorage.removeItem(key);
-  }, [key, timer]);
+  }, [key, timer, form.speed, form.incline, form.distance, form.notes]);
   useEffect(() => {
     if (!timer || timer.status !== "running") return;
     const id = window.setInterval(() => setTick(Date.now()), 1000);
@@ -1972,24 +2142,36 @@ function CardioPage({
           )
         : 0)
     : 0;
+  const option = CARDIO_OPTIONS.find((item) => item.kind === form.kind);
+  const visible = (field: CardioField) => option?.fields.includes(field);
+  const required = (field: CardioField) => option?.required.includes(field);
+  const invalid = (field: CardioField) =>
+    problem?.field === field
+      ? { "aria-invalid": true as const, "aria-describedby": "cardio-problem" }
+      : {};
+  const reportProblem = (field: CardioField, message: string) => {
+    setProblem({ field, message });
+    inform("error", message);
+  };
+  const resetForm = () => {
+    setEditing(null);
+    setProblem(null);
+    submission.reset();
+    setForm(emptyCardioForm(initialDate, defaultKind));
+  };
   const start = () => {
     const now = new Date().toISOString();
-    const sessionDate = form.session_date || initialDate;
-    const activityType = form.activity_type as CardioSession["activity_type"];
     setTimer({
-      activityType,
-      sessionDate,
+      activityType: form.kind === "other" ? "treadmill" : form.kind,
+      sessionDate: form.date || initialDate,
       status: "running",
       accumulatedSeconds: 0,
       pausedSeconds: 0,
       startedAt: now,
       createdAt: now,
+      sessionId: newId(),
     });
-    setForm({
-      ...form,
-      activity_type: activityType,
-      session_date: sessionDate,
-    });
+    setTick(Date.now());
   };
   const pause = () => {
     if (!timer) return;
@@ -2007,119 +2189,123 @@ function CardioPage({
       status: "running",
       startedAt: new Date().toISOString(),
     });
+    setTick(Date.now());
   };
   const discard = () => {
     if (
       window.confirm(
         "Discard this unfinished cardio session? The timer record will be removed.",
       )
-    )
+    ) {
       setTimer(null);
+      setProblem(null);
+    }
   };
-  const sessionPayload = (
-    seconds: number,
-    paused = 0,
-    sessionDate = form.session_date,
-    activityType = form.activity_type as CardioSession["activity_type"],
-  ) => ({
-    user_id: data.userId,
-    activity_type: activityType,
-    session_date: sessionDate,
-    active_seconds: seconds,
-    paused_seconds: paused,
-    distance_km: form.distance_km ? Number(form.distance_km) : null,
-    average_speed_kmh: form.average_speed_kmh
-      ? Number(form.average_speed_kmh)
-      : null,
-    incline_percent: form.incline_percent ? Number(form.incline_percent) : null,
-    heart_rate_bpm: form.heart_rate_bpm ? Number(form.heart_rate_bpm) : null,
-    machine_calories: form.machine_calories
-      ? Number(form.machine_calories)
-      : null,
-    notes: form.notes || null,
-  });
   const finish = async () => {
-    if (!timer || !elapsed)
-      return inform("error", "Run the timer before finishing a session.");
-    setBusy(true);
-    const totalWallSeconds = Math.max(
-      0,
-      Math.floor((Date.now() - new Date(timer.createdAt).getTime()) / 1000),
+    if (!timer || saving.current) return;
+    const check = validateCardio(
+      { ...form, kind: timer.activityType, date: timer.sessionDate },
+      today,
+      { seconds: elapsed },
     );
-    const { error } = await supabase!
-      .from("cardio_sessions")
-      .insert({
-        ...sessionPayload(
-          elapsed,
-          Math.max(0, totalWallSeconds - elapsed),
-          timer.sessionDate,
-          timer.activityType,
-        ),
-        started_at: timer.createdAt,
-      });
-    setBusy(false);
-    if (error) return inform("error", error.message);
-    setTimer(null);
-    setForm({
-      activity_type: "treadmill",
-      session_date: todayISO(),
-      active_minutes: "",
-      distance_km: "",
-      average_speed_kmh: "",
-      incline_percent: "",
-      heart_rate_bpm: "",
-      machine_calories: "",
-      notes: "",
-    });
-    inform("success", "Cardio session saved to your cloud record.");
-    await refresh();
+    if (!check.ok) return reportProblem(check.field, check.error);
+    if (
+      elapsed > 4 * 3600 &&
+      !window.confirm(
+        `The timer shows ${minuteLabel(elapsed)} of active time. Save it as it is? (Cancel to discard or correct it first.)`,
+      )
+    )
+      return;
+    saving.current = true;
+    setBusy(true);
+    try {
+      const wallSeconds = Math.max(
+        0,
+        Math.floor((Date.now() - new Date(timer.createdAt).getTime()) / 1000),
+      );
+      const { error } = await supabase!.from("cardio_sessions").upsert(
+        {
+          id: timer.sessionId ?? newId(),
+          user_id: data.userId,
+          ...check.payload,
+          paused_seconds: Math.max(0, wallSeconds - elapsed),
+          started_at: timer.createdAt,
+        },
+        { onConflict: "id", ignoreDuplicates: true },
+      );
+      if (error) return inform("error", error.message);
+      const finishedKind = timer.activityType;
+      setTimer(null);
+      setProblem(null);
+      submission.reset();
+      setForm(emptyCardioForm(initialDate, finishedKind));
+      inform("success", "Cardio session saved to your cloud record.");
+      await refresh();
+    } finally {
+      saving.current = false;
+      setBusy(false);
+    }
   };
   const saveManual = async (event: React.FormEvent) => {
     event.preventDefault();
-    const seconds = Math.round(Number(form.active_minutes) * 60);
-    if (!Number.isFinite(seconds) || seconds <= 0)
-      return inform("error", "Enter an active duration greater than zero.");
-    setBusy(true);
-    const payload = sessionPayload(seconds);
-    const request = editing
-      ? supabase!.from("cardio_sessions").update(payload).eq("id", editing)
-      : supabase!.from("cardio_sessions").insert(payload);
-    const { error } = await request;
-    setBusy(false);
-    if (error) return inform("error", error.message);
-    setEditing(null);
-    setForm({
-      activity_type: "treadmill",
-      session_date: todayISO(),
-      active_minutes: "",
-      distance_km: "",
-      average_speed_kmh: "",
-      incline_percent: "",
-      heart_rate_bpm: "",
-      machine_calories: "",
-      notes: "",
+    if (timer) return finish();
+    if (saving.current) return;
+    const check = validateCardio(form, today, {
+      previousKind: editing?.activity_type ?? null,
     });
-    inform("success", "Cardio session saved.");
-    await refresh();
+    if (!check.ok) return reportProblem(check.field, check.error);
+    saving.current = true;
+    setBusy(true);
+    try {
+      let failure: string | null = null;
+      if (editing) {
+        // Never rewrite a duration the user did not change, and never touch fields this
+        // form does not show (heart rate, machine calories, paused time, start time).
+        const { active_seconds: seconds, ...withoutDuration } = check.payload;
+        const payload = sameDuration(form.minutes, editing.active_seconds)
+          ? withoutDuration
+          : { ...withoutDuration, active_seconds: seconds };
+        failure =
+          (
+            await supabase!
+              .from("cardio_sessions")
+              .update(payload)
+              .eq("id", editing.id)
+          ).error?.message ?? null;
+      } else {
+        failure =
+          (
+            await supabase!.from("cardio_sessions").upsert(
+              {
+                id: submission.current(),
+                user_id: data.userId,
+                ...check.payload,
+              },
+              { onConflict: "id", ignoreDuplicates: true },
+            )
+          ).error?.message ?? null;
+      }
+      if (failure) return inform("error", failure);
+      const savedKind = form.kind;
+      setEditing(null);
+      setProblem(null);
+      submission.reset();
+      setForm(
+        emptyCardioForm(initialDate, savedKind === "other" ? "treadmill" : savedKind),
+      );
+      inform("success", editing ? "Cardio session updated." : "Cardio session saved.");
+      await refresh();
+    } finally {
+      saving.current = false;
+      setBusy(false);
+    }
   };
   const edit = (item: CardioSession) => {
-    setEditing(item.id);
-    setForm({
-      activity_type: item.activity_type,
-      session_date: item.session_date,
-      active_minutes: String(Math.round(item.active_seconds / 60)),
-      distance_km: item.distance_km == null ? "" : String(item.distance_km),
-      average_speed_kmh:
-        item.average_speed_kmh == null ? "" : String(item.average_speed_kmh),
-      incline_percent:
-        item.incline_percent == null ? "" : String(item.incline_percent),
-      heart_rate_bpm:
-        item.heart_rate_bpm == null ? "" : String(item.heart_rate_bpm),
-      machine_calories:
-        item.machine_calories == null ? "" : String(item.machine_calories),
-      notes: item.notes ?? "",
-    });
-    window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" });
+    setEditing(item);
+    setProblem(null);
+    submission.reset();
+    setForm(formFromSession(item));
+    logRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
   };
   const remove = async (id: string) => {
     if (!window.confirm("Delete this cardio session?")) return;
@@ -2128,14 +2314,15 @@ function CardioPage({
       .delete()
       .eq("id", id);
     if (error) return inform("error", error.message);
+    if (editing?.id === id) resetForm();
     inform("success", "Cardio session deleted.");
     await refresh();
   };
   const weekSeconds = data.cardio
-    .filter((item) => sameWeek(item.session_date))
+    .filter((item) => sameWeek(item.session_date, today))
     .reduce((sum, item) => sum + item.active_seconds, 0);
   const monthSeconds = data.cardio
-    .filter((item) => item.session_date >= startOfMonth())
+    .filter((item) => item.session_date >= startOfMonth(today))
     .reduce((sum, item) => sum + item.active_seconds, 0);
   const totalDistance = data.cardio.reduce(
     (sum, item) => sum + Number(item.distance_km ?? 0),
@@ -2148,7 +2335,7 @@ function CardioPage({
           label="Today"
           value={minuteLabel(
             data.cardio
-              .filter((item) => item.session_date === todayISO())
+              .filter((item) => item.session_date === today)
               .reduce((sum, item) => sum + item.active_seconds, 0),
           )}
           detail="Active time"
@@ -2167,7 +2354,7 @@ function CardioPage({
         <StatCard
           label="This month"
           value={minuteLabel(monthSeconds)}
-          detail={`${data.cardio.filter((item) => item.session_date >= startOfMonth()).length} sessions`}
+          detail={`${data.cardio.filter((item) => item.session_date >= startOfMonth(today)).length} sessions`}
           icon={<CalendarDays />}
         />
         <StatCard
@@ -2177,120 +2364,217 @@ function CardioPage({
           icon={<TrendingDown />}
         />
       </section>
-      <section className="timer-card">
-        <div>
-          <p className="eyebrow">Built-in timer</p>
-          <h2>Treadmill session</h2>
-          <p className="muted">
-            Active elapsed time persists through a refresh. Paused time is never
-            counted as exercise.
+      <section className="form-card cardio-log" ref={logRef}>
+        <p className="eyebrow">{editing ? "Edit session" : "Log cardio"}</p>
+        <h2>{editing ? "Correct this cardio record" : "What did you do?"}</h2>
+        <div
+          className="cardio-options"
+          role="radiogroup"
+          aria-label="Cardio activity"
+        >
+          {CARDIO_OPTIONS.map((item) => {
+            const Icon = CARDIO_ICONS[item.kind];
+            const selected = form.kind === item.kind;
+            return (
+              <button
+                key={item.kind}
+                type="button"
+                role="radio"
+                aria-checked={selected}
+                className={`cardio-option${selected ? " selected" : ""}`}
+                disabled={Boolean(timer) && !selected}
+                onClick={() => change({ kind: item.kind })}
+              >
+                <Icon size={22} aria-hidden="true" />
+                <strong>{item.label}</strong>
+                <span>{item.hint}</span>
+              </button>
+            );
+          })}
+        </div>
+        {timer && (
+          <p className="calorie-note">
+            The activity is locked while the timer is running.
           </p>
-        </div>
-        <div className="timer-display">{minuteLabel(elapsed)}</div>
-        {!timer ? (
-          <button className="primary timer-action" onClick={start}>
-            <Clock3 />
-            Start session
-          </button>
-        ) : (
-          <div className="timer-controls">
-            {timer.status === "running" ? (
-              <button className="secondary" onClick={pause}>
-                Pause
-              </button>
-            ) : (
-              <button className="primary" onClick={resume}>
-                Resume
-              </button>
-            )}
-            <button
-              className="primary"
-              disabled={busy || !elapsed}
-              onClick={finish}
-            >
-              {busy ? "Saving…" : "Finish & save"}
-            </button>
-            <button className="danger-button" onClick={discard}>
-              Discard
-            </button>
-          </div>
         )}
-        <div className="inline-form">
+        {form.kind === "other" && (
+          <p className="calorie-note">
+            This is an older “other cardio” record. Its other details are kept
+            as they are; choose Cycling, Treadmill or Walking above to
+            re-classify it.
+          </p>
+        )}
+        <form className="form-stack" onSubmit={saveManual} noValidate>
           <label>
-            Activity
-            <select
-              value={form.activity_type}
-              onChange={(e) =>
-                setForm({ ...form, activity_type: e.target.value })
-              }
-            >
-              <option value="treadmill">Treadmill</option>
-              <option value="cycling">Cycling</option>
-              <option value="walking">Walking</option>
-              <option value="other">Other cardio</option>
-            </select>
-          </label>
-          <label>
-            Distance (km)
+            Date
             <input
-              inputMode="decimal"
-              value={form.distance_km}
-              onChange={(e) =>
-                setForm({ ...form, distance_km: e.target.value })
-              }
+              type="date"
+              max={today}
+              value={form.date}
+              disabled={Boolean(timer)}
+              onChange={(e) => change({ date: e.target.value })}
+              {...invalid("date")}
             />
           </label>
-          <label>
-            Speed (km/h)
-            <input
-              inputMode="decimal"
-              value={form.average_speed_kmh}
-              onChange={(e) =>
-                setForm({ ...form, average_speed_kmh: e.target.value })
-              }
-            />
-          </label>
-          <label>
-            Incline (%)
-            <input
-              inputMode="decimal"
-              value={form.incline_percent}
-              onChange={(e) =>
-                setForm({ ...form, incline_percent: e.target.value })
-              }
-            />
-          </label>
-        </div>
-      </section>
-      <section className="two-column lower">
-        <section className="list-card">
-          <div className="section-heading">
-            <div>
-              <p className="eyebrow">History</p>
-              <h2>Cardio sessions</h2>
+          {visible("speed") && (
+            <label>
+              Speed (km/h){" "}
+              {required("speed") && <span className="optional">required</span>}
+              <input
+                inputMode="decimal"
+                value={form.speed}
+                placeholder="e.g. 6"
+                aria-required="true"
+                onChange={(e) => change({ speed: e.target.value })}
+                {...invalid("speed")}
+              />
+            </label>
+          )}
+          {visible("incline") && (
+            <label>
+              Incline (%){" "}
+              {required("incline") && (
+                <span className="optional">required — 0 for flat</span>
+              )}
+              <input
+                inputMode="decimal"
+                value={form.incline}
+                placeholder="e.g. 5"
+                aria-required="true"
+                onChange={(e) => change({ incline: e.target.value })}
+                {...invalid("incline")}
+              />
+            </label>
+          )}
+          {visible("distance") && (
+            <label>
+              Distance (km) <span className="optional">optional</span>
+              <input
+                inputMode="decimal"
+                value={form.distance}
+                placeholder="if you know it"
+                onChange={(e) => change({ distance: e.target.value })}
+                {...invalid("distance")}
+              />
+            </label>
+          )}
+          {timer ? (
+            <div className="cardio-time" aria-label="Live timer">
+              <p className="eyebrow">Live timer</p>
+              <div className="timer-display">{minuteLabel(elapsed)}</div>
+              <div className="timer-controls">
+                {timer.status === "running" ? (
+                  <button type="button" className="secondary" onClick={pause}>
+                    Pause
+                  </button>
+                ) : (
+                  <button type="button" className="primary" onClick={resume}>
+                    Resume
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className="danger-button"
+                  onClick={discard}
+                >
+                  Discard
+                </button>
+              </div>
+              <p className="calorie-note">
+                Paused time is never counted. The timer keeps going through a
+                refresh. Enter any details above, then Finish &amp; save.
+              </p>
             </div>
+          ) : (
+            <>
+              <label>
+                Time (minutes){" "}
+                <span className="optional">required</span>
+                <input
+                  inputMode="decimal"
+                  value={form.minutes}
+                  placeholder="e.g. 30"
+                  aria-required="true"
+                  onChange={(e) => change({ minutes: e.target.value })}
+                  {...invalid("minutes")}
+                />
+              </label>
+              {!editing && (
+                <button type="button" className="secondary" onClick={start}>
+                  <Clock3 size={16} />
+                  Use the live timer instead
+                </button>
+              )}
+            </>
+          )}
+          <label>
+            Notes <span className="optional">optional</span>
+            <textarea
+              value={form.notes}
+              onChange={(e) => change({ notes: e.target.value })}
+            />
+          </label>
+          {problem && (
+            <p className="calorie-error" id="cardio-problem" role="alert">
+              {problem.message}
+            </p>
+          )}
+          <button className="primary" disabled={busy || (Boolean(timer) && !elapsed)}>
+            {busy
+              ? "Saving…"
+              : timer
+                ? "Finish & save"
+                : editing
+                  ? "Update session"
+                  : "Save session"}
+          </button>
+          {editing && (
+            <button type="button" className="secondary" onClick={resetForm}>
+              Cancel
+            </button>
+          )}
+        </form>
+      </section>
+      <section className="list-card">
+        <div className="section-heading">
+          <div>
+            <p className="eyebrow">History</p>
+            <h2>Cardio sessions</h2>
           </div>
-          {data.cardio.length ? (
-            <div className="data-list">
-              {data.cardio.map((item) => (
+        </div>
+        {data.cardio.length ? (
+          <div className="data-list">
+            {data.cardio.map((item) => {
+              const estimate = estimateCardioActiveCalories(
+                item,
+                weightInfoForDate(item.session_date, data.weights, data.profile)
+                  .kg,
+              );
+              const details = cardioDetails(item);
+              return (
                 <div className="list-row" key={item.id}>
                   <div>
                     <strong>
-                      {item.activity_type} · {minuteLabel(item.active_seconds)}
+                      {cardioLabel(item.activity_type)} ·{" "}
+                      {minuteLabel(item.active_seconds)}
                     </strong>
                     <span>
                       {formatDate(item.session_date)}
-                      {item.distance_km != null
-                        ? ` · ${item.distance_km} km`
-                        : ""}
-                      {item.machine_calories != null
-                        ? ` · ${item.machine_calories} machine kcal`
-                        : ""}
+                      {details.length ? ` · ${details.join(" · ")}` : ""}
+                    </span>
+                    <span title={estimate.method}>
+                      {estimate.calories == null
+                        ? "No calorie estimate"
+                        : `≈ ${number(estimate.calories)} kcal burned (estimate)`}
                     </span>
                   </div>
                   <div className="row-actions">
                     <button
                       aria-label="Edit cardio session"
+                      disabled={Boolean(timer)}
+                      title={
+                        timer ? "Finish or discard the running timer first" : undefined
+                      }
                       onClick={() => edit(item)}
                     >
                       <Pencil size={16} />
@@ -2303,73 +2587,15 @@ function CardioPage({
                     </button>
                   </div>
                 </div>
-              ))}
-            </div>
-          ) : (
-            <EmptyState
-              title="No cardio sessions"
-              text="Start the timer or add a session you did not time here."
-            />
-          )}
-        </section>
-        <aside className="form-card">
-          <p className="eyebrow">
-            {editing ? "Edit session" : "Manual session"}
-          </p>
-          <h2>{editing ? "Correct cardio record" : "Log without the timer"}</h2>
-          <form className="form-stack" onSubmit={saveManual}>
-            <label>
-              Date
-              <input
-                type="date"
-                value={form.session_date}
-                onChange={(e) =>
-                  setForm({ ...form, session_date: e.target.value })
-                }
-              />
-            </label>
-            <label>
-              Active duration (minutes)
-              <input
-                required
-                inputMode="numeric"
-                value={form.active_minutes}
-                onChange={(e) =>
-                  setForm({ ...form, active_minutes: e.target.value })
-                }
-              />
-            </label>
-            <label>
-              Machine calories <span className="optional">optional</span>
-              <input
-                inputMode="numeric"
-                value={form.machine_calories}
-                onChange={(e) =>
-                  setForm({ ...form, machine_calories: e.target.value })
-                }
-              />
-            </label>
-            <label>
-              Notes <span className="optional">optional</span>
-              <textarea
-                value={form.notes}
-                onChange={(e) => setForm({ ...form, notes: e.target.value })}
-              />
-            </label>
-            <button className="primary" disabled={busy}>
-              {busy ? "Saving…" : editing ? "Update session" : "Save session"}
-            </button>
-            {editing && (
-              <button
-                type="button"
-                className="secondary"
-                onClick={() => setEditing(null)}
-              >
-                Cancel
-              </button>
-            )}
-          </form>
-        </aside>
+              );
+            })}
+          </div>
+        ) : (
+          <EmptyState
+            title="No cardio sessions"
+            text="Choose cycling, treadmill or walking above and log your time."
+          />
+        )}
       </section>
     </div>
   );
@@ -2407,10 +2633,7 @@ function LiveWorkout({
   today: string;
   refresh: () => Promise<void>;
   inform: (type: "success" | "error", message: string) => void;
-  onEnded: (
-    sessionId: string,
-    status: "completed" | "discarded"
-  ) => void;
+  onEnded: () => void;
 }) {
   // Browser storage holds ONLY the set inputs typed so far, and only for the session the
   // database says is active (this component is keyed by that session's id).
@@ -2506,7 +2729,7 @@ function LiveWorkout({
       }
       ended.current = true;
       clearDraft(storage, data.userId);
-      onEnded(active.id, "completed");
+      onEnded();
       inform(
         "success",
         "Workout saved. Your calendar and performance records will update now.",
@@ -2537,7 +2760,7 @@ function LiveWorkout({
       }
       ended.current = true;
       clearDraft(storage, data.userId);
-      onEnded(active.id, "discarded");
+      onEnded();
       inform(
         "success",
         "Unfinished workout discarded. Completed workout history was not changed.",
@@ -2735,20 +2958,12 @@ function WorkoutPage({
   refresh,
   inform,
   initialDate,
-  onSessionStarted,
-  onSessionEnded,
 }: {
   data: AppData;
   today: string;
   refresh: () => Promise<void>;
   inform: (type: "success" | "error", message: string) => void;
   initialDate: string | null;
-  onSessionStarted: (session: WorkoutSession) => void;
-
-onSessionEnded: (
-  sessionId: string,
-  status: "completed" | "discarded"
-) => void;
 }) {
   // The active workout is whatever the database says it is. There is deliberately no
   // browser-held "active session" state that could drift out of step with it.
@@ -2791,7 +3006,6 @@ onSessionEnded: (
       });
       if (error) return inform("error", describeDbError(error, MIGRATIONS.lifecycle));
       const session = result as WorkoutSession;
-      onSessionStarted(session);
       if (session.workout_plan_id !== plan.id)
         inform(
           "success",
@@ -2827,9 +3041,8 @@ onSessionEnded: (
         today={today}
         refresh={refresh}
         inform={inform}
-        onEnded={(sessionId, status) => {
+        onEnded={() => {
           endedHere.current = true;
-          onSessionEnded(sessionId, status);
         }}
       />
     );
@@ -3054,7 +3267,11 @@ function ProgressPage({
     const day = addDays(today, -i);
     const plan = data.plans.find((item) => item.weekday === weekday(day));
     if (plan?.is_rest_day) continue;
-    if (!activeDates.has(day)) break;
+    if (!activeDates.has(day)) {
+      // Today is not over yet: not having trained so far must not wipe out a running streak.
+      if (i === 0) continue;
+      break;
+    }
     streak++;
   }
   const totalVolume = data.sets
@@ -3102,14 +3319,19 @@ function ProgressPage({
     })
     .sort((a, b) => b.weight - a.weight)
     .slice(0, 8);
-  const plannedMonth = Array.from({ length: 31 }, (_, i) =>
-    addDays(todayISO(), -i),
+  // Month to date on both sides: planned training days from the 1st through today, against
+  // sessions completed since the 1st. (This used to count planned days over a rolling 31 days
+  // but completions only since the 1st, which under-reported consistency early in every month.)
+  const monthStart = startOfMonth(today);
+  const plannedMonth = Array.from(
+    { length: Number(today.slice(8, 10)) },
+    (_, i) => addDays(monthStart, i),
   ).filter(
     (day) =>
       !data.plans.find((item) => item.weekday === weekday(day))?.is_rest_day,
   ).length;
   const completeMonth = completed.filter(
-    (item) => item.session_date >= startOfMonth(),
+    (item) => item.session_date >= monthStart && item.session_date <= today,
   ).length;
   return (
     <div className="page progress-page">
@@ -4377,3 +4599,7 @@ function EmptyState({ title, text }: { title: string; text: string }) {
     </div>
   );
 }
+
+// Exported so the render tests (tests/render.test.tsx) can server-render these screens with fixture data.
+export { CardioPage, Dashboard, DateDetail, NutritionPage, ProgressPage, WorkoutPage };
+export type { AppData };

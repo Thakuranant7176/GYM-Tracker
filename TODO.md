@@ -25,7 +25,6 @@ Status is based on source inspection and tests available in the current review, 
 ## P1 — Recommended polish
 
 - [ ] Browser-test the rings at ~1200, ~700 and ~390 px widths (3, 2, 1 columns), and the live midnight rollover. No component/browser tests exist yet; a DOM-based test setup would need new dev dependencies.
-- [ ] Cardio "Finish" is not idempotent (a retry after a lost response could insert a second cardio row). Give the timer a client-generated id and insert with `ON CONFLICT DO NOTHING`, as manual calories already do.
 - [ ] The main data load still uses a plain `select *` (PostgREST cap: 1,000 rows) for most tables; only `workout_sets` and the monthly report paginate. Fine for months of use; paginate more tables for years of data.
 - [ ] The Weight/Nutrition forms keep their initial date if left open across midnight (the date field is visible and editable).
 - [ ] Optional: store the strength draft's inputs in the database so unfinished set entries also follow the user across devices (the session itself already does).
@@ -39,8 +38,10 @@ Status is based on source inspection and tests available in the current review, 
 - [x] Midnight (`Asia/Kolkata`) rollover without a refresh; IST-only date maths; sessions attributed to their start date.
 - [x] Monthly report (Markdown + JSON) with provenance labels, gaps, PRs, streaks, balance, and user-data boundaries.
 - [x] Workout lifecycle moved into the database (`in_progress` / `completed` / `discarded`, one active per user, confirmed discard, stale-session handling, legacy-row handling) — SQL written, not executed.
-- [x] 72 unit tests (`pnpm test`); SQL verification script written (`supabase/tests/`).
+- [x] 149 tests (`pnpm test`: unit tests plus server-render tests of the main screens); SQL verification script written (`supabase/tests/`).
 - [x] Repaired the inherited uncommitted work, which did not compile.
+- [x] Cardio logging rebuilt around three options (cycling / treadmill with speed and incline / walking), retry-safe inserts, edits that never rewrite untouched data, per-session calorie estimates in history.
+- [x] Discrepancy fixes found in review: Nutrition page and weekly chart now include quick-add calories; the day-detail panel no longer counts discarded or unfinished workouts as completed and shows that day's calories; the Progress "monthly consistency" compared a rolling 31-day plan with month-to-date completions; the training streak reset to 0 until you trained today; food/weight forms got proper validation, double-submit protection and a plain message for a duplicate weight date.
 
 ## Completed in an earlier review (2026-10-27)
 

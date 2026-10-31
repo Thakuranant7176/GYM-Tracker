@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { createSubmissionTracker, validateIntake } from '../src/intake'
+import { createContentTracker, createSubmissionTracker, validateIntake } from '../src/intake'
 
 const ctx = { foodCalories: 400, currentTotal: 1000 }
 
@@ -65,4 +65,18 @@ test('simulated store: a lost response followed by a retry stores the entry once
   insertIgnoringDuplicates({ id: tracker.current(), calories: 600 })
   assert.equal(rows.size, 2)
   assert.deepEqual([...rows.values()].map((row) => row.calories), [500, 600])
+})
+
+test('content tracker: the same content reuses its id, different content gets a new one', () => {
+  let counter = 0
+  const tracker = createContentTracker(() => `id-${++counter}`)
+  const first = tracker.idFor('{"calories":450}')
+  assert.equal(tracker.idFor('{"calories":450}'), first) // retry / double tap
+  const second = tracker.idFor('{"calories":500}') // the user changed the entry
+  assert.notEqual(second, first)
+  assert.notEqual(tracker.idFor('{"calories":450}'), first) // going back is a new submission, not the old one
+  assert.equal(counter, 3) // three distinct submissions so far
+  tracker.reset()
+  assert.equal(tracker.idFor('{"calories":450}'), 'id-4') // after a success a repeat is a deliberate new entry
+  assert.equal(counter, 4)
 })

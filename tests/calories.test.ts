@@ -6,9 +6,12 @@ import {
   calculateDailyCalories,
   calorieProgress,
   calorieProgressColor,
+  cardioSpeedKmh,
+  cyclingMetForSpeed,
   describeBalance,
   estimateCardioActiveCalories,
   estimateStrengthActiveCalories,
+  intakeForDate,
   percentLabel,
   RING_COLORS,
   weightInfoForDate,
@@ -216,4 +219,81 @@ test('balance progress for deficit and surplus targets', () => {
   assert.equal(balanceProgress(250, 0), null)
   assert.equal(balanceProgress(250, null), null)
   assert.equal(balanceProgress(null, 500), null)
+})
+
+// ---- walking and cycling use speed/distance when it was recorded --------------------------------
+test('walking with a distance is estimated from its speed (same ACSM equation, flat)', () => {
+  const walk = estimateCardioActiveCalories(cardio({ session_date: day, activity_type: 'walking', distance_km: 3 }), 70) // 3 km in 30 min = 6 km/h
+  assert.equal(walk.calories, 105)
+  assert.equal(walk.confidence, 'speed_based')
+  const slow = estimateCardioActiveCalories(cardio({ session_date: day, activity_type: 'walking', distance_km: 1.5 }), 70) // 3 km/h
+  assert.ok((slow.calories ?? 0) < (walk.calories ?? 0), 'a slower walk burns less')
+  assert.equal(slow.confidence, 'speed_based')
+})
+
+test('walking with time only stays an assumed-intensity estimate', () => {
+  const walk = estimateCardioActiveCalories(cardio({ session_date: day, activity_type: 'walking' }), 70)
+  assert.equal(walk.calories, 92)
+  assert.equal(walk.confidence, 'assumed_intensity')
+})
+
+test('an older walking record that has a speed and incline uses them', () => {
+  const walk = estimateCardioActiveCalories(cardio({ session_date: day, activity_type: 'walking', average_speed_kmh: 6, incline_percent: 10 }), 70)
+  assert.equal(walk.calories, 294)
+})
+
+test('an impossible walking distance is rejected, not turned into calories', () => {
+  const walk = estimateCardioActiveCalories(cardio({ session_date: day, activity_type: 'walking', distance_km: 15 }), 70) // 30 km/h
+  assert.equal(walk.calories, null)
+  assert.equal(walk.confidence, 'unavailable')
+})
+
+test('cycling with a distance uses the Compendium MET for its average speed', () => {
+  const at = (km: number) => estimateCardioActiveCalories(cardio({ session_date: day, activity_type: 'cycling', distance_km: km }), 70)
+  // Each value is (MET - 1) x 3.5 x 70 kg x 30 min / 200, worked out by hand from the band.
+  assert.equal(at(5).calories, 110) // 10 km/h -> 4.0 MET: 3.0 x 3.5 x 70 x 30 / 200 = 110.25
+  assert.equal(at(8.5).calories, 213) // 17 km/h -> 6.8 MET: 5.8 x 3.5 x 70 x 30 / 200 = 213.15
+  assert.equal(at(10).calories, 257) // 20 km/h -> 8.0 MET: 7.0 x 3.5 x 70 x 30 / 200 = 257.25
+  assert.equal(at(12).calories, 331) // 24 km/h -> 10.0 MET: 9.0 x 3.5 x 70 x 30 / 200 = 330.75
+  assert.equal(at(13).calories, 404) // 26 km/h -> 12.0 MET: 11.0 x 3.5 x 70 x 30 / 200 = 404.25
+  assert.equal(at(15).calories, 404) // 30 km/h -> still the 12.0 MET band
+  assert.equal(at(5).confidence, 'speed_based')
+  assert.match(at(5).method, /MET 4/)
+  assert.match(at(10).method, /MET 8/)
+})
+
+test('cycling with time only is the fixed assumed-intensity estimate; impossible speeds are rejected', () => {
+  const plain = estimateCardioActiveCalories(cardio({ session_date: day, activity_type: 'cycling' }), 70)
+  assert.equal(plain.calories, 213)
+  assert.equal(plain.confidence, 'assumed_intensity')
+  const absurd = estimateCardioActiveCalories(cardio({ session_date: day, activity_type: 'cycling', distance_km: 40 }), 70) // 80 km/h
+  assert.equal(absurd.calories, null)
+})
+
+test('cycling MET bands at their boundaries', () => {
+  const cases: Array<[number, number]> = [[0.1, 4], [16.0, 4], [16.1, 6.8], [19.2, 6.8], [19.3, 8], [22.4, 8], [22.5, 10], [25.6, 10], [25.7, 12], [32.1, 12], [32.2, 15.8], [55, 15.8]]
+  for (const [speed, met] of cases) assert.equal(cyclingMetForSpeed(speed), met, `${speed} km/h`)
+})
+
+test('speed comes from the recorded speed first, then distance over time, else none', () => {
+  assert.equal(cardioSpeedKmh({ average_speed_kmh: 7, distance_km: 1, active_seconds: 3600 }), 7)
+  assert.equal(cardioSpeedKmh({ average_speed_kmh: null, distance_km: 6, active_seconds: 3600 }), 6)
+  assert.equal(cardioSpeedKmh({ average_speed_kmh: null, distance_km: null, active_seconds: 3600 }), null)
+  assert.equal(cardioSpeedKmh({ average_speed_kmh: 0, distance_km: 0, active_seconds: 3600 }), null)
+})
+
+// ---- one definition of "intake" for every screen -------------------------------------------------
+test('intakeForDate: food + quick-add, per date; nothing recorded is null, a recorded 0 is 0', () => {
+  assert.deepEqual(intakeForDate(day, [], []), { foodCalories: 0, foodEntryCount: 0, quickAddCalories: 0, quickAddEntryCount: 0, total: null })
+  const mixed = intakeForDate(day, [food(day, 400), food('2026-10-29', 900)], [quick(day, 650), quick('2026-10-31', 100)])
+  assert.deepEqual(mixed, { foodCalories: 400, foodEntryCount: 1, quickAddCalories: 650, quickAddEntryCount: 1, total: 1050 })
+  assert.equal(intakeForDate(day, [], [quick(day, 0, { source: 'set' })]).total, 0)
+  const entry = quick(day, 500)
+  assert.equal(intakeForDate(day, [], [entry, entry]).total, 500)
+})
+
+test('the daily summary and intakeForDate always agree', () => {
+  const foods = [food(day, 250), food(day, 300)]
+  const quickEntries = [quick(day, 125)]
+  assert.equal(calculateDailyCalories({ ...base, foods, quickEntries }).intakeCalories, intakeForDate(day, foods, quickEntries).total)
 })
