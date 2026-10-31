@@ -49,6 +49,8 @@ import {
   saveDraft,
   sessionDateFor,
   whyWorkoutEnded,
+  markWorkoutSessionEnded,
+  upsertWorkoutSession,
 } from "./workoutLifecycle";
 import { DEFAULT_PLAN, MUSCLES } from "./defaultPlan";
 import {
@@ -591,6 +593,20 @@ function Tracker({ session }: { session: Session }) {
             refresh={refresh}
             inform={inform}
             initialDate={logDate}
+            onSessionStarted={(started) => {
+              loadSequence.current += 1;
+
+              setWorkouts((current) =>
+                upsertWorkoutSession(current, started),
+              );
+            }}
+            onSessionEnded={(sessionId, status) => {
+              loadSequence.current += 1;
+
+              setWorkouts((current) =>
+                markWorkoutSessionEnded(current, sessionId, status),
+              );
+            }}
           />
         )}
         {page === "progress" && (
@@ -2391,7 +2407,10 @@ function LiveWorkout({
   today: string;
   refresh: () => Promise<void>;
   inform: (type: "success" | "error", message: string) => void;
-  onEnded: () => void;
+  onEnded: (
+    sessionId: string,
+    status: "completed" | "discarded"
+  ) => void;
 }) {
   // Browser storage holds ONLY the set inputs typed so far, and only for the session the
   // database says is active (this component is keyed by that session's id).
@@ -2487,7 +2506,7 @@ function LiveWorkout({
       }
       ended.current = true;
       clearDraft(storage, data.userId);
-      onEnded();
+      onEnded(active.id, "completed");
       inform(
         "success",
         "Workout saved. Your calendar and performance records will update now.",
@@ -2518,7 +2537,7 @@ function LiveWorkout({
       }
       ended.current = true;
       clearDraft(storage, data.userId);
-      onEnded();
+      onEnded(active.id, "discarded");
       inform(
         "success",
         "Unfinished workout discarded. Completed workout history was not changed.",
@@ -2716,12 +2735,20 @@ function WorkoutPage({
   refresh,
   inform,
   initialDate,
+  onSessionStarted,
+  onSessionEnded,
 }: {
   data: AppData;
   today: string;
   refresh: () => Promise<void>;
   inform: (type: "success" | "error", message: string) => void;
   initialDate: string | null;
+  onSessionStarted: (session: WorkoutSession) => void;
+
+onSessionEnded: (
+  sessionId: string,
+  status: "completed" | "discarded"
+) => void;
 }) {
   // The active workout is whatever the database says it is. There is deliberately no
   // browser-held "active session" state that could drift out of step with it.
@@ -2764,6 +2791,7 @@ function WorkoutPage({
       });
       if (error) return inform("error", describeDbError(error, MIGRATIONS.lifecycle));
       const session = result as WorkoutSession;
+      onSessionStarted(session);
       if (session.workout_plan_id !== plan.id)
         inform(
           "success",
@@ -2799,8 +2827,9 @@ function WorkoutPage({
         today={today}
         refresh={refresh}
         inform={inform}
-        onEnded={() => {
+        onEnded={(sessionId, status) => {
           endedHere.current = true;
+          onSessionEnded(sessionId, status);
         }}
       />
     );

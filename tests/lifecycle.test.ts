@@ -1,6 +1,10 @@
-import test from 'node:test'
-import assert from 'node:assert/strict'
+/// <reference types="node" />
+
+import test from 'node:test';
+import assert from 'node:assert/strict';
 import {
+  markWorkoutSessionEnded,
+  upsertWorkoutSession,
   clearDraft,
   describeActiveSession,
   draftStorageKey,
@@ -28,6 +32,57 @@ const memoryStorage = (): StorageLike & { data: Map<string, string> } => {
     },
   }
 }
+
+
+test('confirmed start immediately updates active session', () => {
+  const active = workout({
+    session_date: '2026-10-30',
+    status: 'in_progress',
+    title: 'Push',
+  });
+
+  const next = workout({
+    session_date: '2026-10-31',
+    status: 'in_progress',
+    title: 'Pull',
+  });
+
+  const updated = upsertWorkoutSession([active], next);
+
+  assert.equal(findActiveSession(updated)?.id, next.id);
+});
+
+test('confirmed discard immediately removes active session', () => {
+  const active = workout({
+    session_date: '2026-10-30',
+    status: 'in_progress',
+  });
+
+  const updated = markWorkoutSessionEnded(
+    [active],
+    active.id,
+    'discarded',
+  );
+
+  assert.equal(findActiveSession(updated), null);
+});
+
+test('completed workout remains in history', () => {
+  const active = workout({
+    session_date: '2026-10-30',
+    status: 'in_progress',
+  });
+
+  const updated = markWorkoutSessionEnded(
+    [active],
+    active.id,
+    'completed',
+  );
+
+  assert.equal(findActiveSession(updated), null);
+  assert.equal(updated[0].status, 'completed');
+});
+
 
 test('status decides completion; pre-migration rows fall back to the legacy flag', () => {
   assert.equal(isCompletedSession(workout({ session_date: '2026-10-30', status: 'completed' })), true)

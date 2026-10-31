@@ -1,5 +1,5 @@
 import { istDate } from './lib'
-import type { WorkoutPlan, WorkoutSession } from './types'
+import type { WorkoutPlan, WorkoutSession, WorkoutStatus } from './types'
 
 // ---------------------------------------------------------------------------
 // Workout lifecycle, client side.
@@ -35,6 +35,32 @@ export function findActiveSession(workouts: WorkoutSession[]): WorkoutSession | 
   return best
 }
 const startedKey = (session: WorkoutSession) => `${session.started_at ?? session.created_at ?? ''}|${session.id}`
+
+export function upsertWorkoutSession(
+  workouts: WorkoutSession[],
+  session: WorkoutSession,
+): WorkoutSession[] {
+  return [
+    session,
+    ...workouts.filter((row) => row.id !== session.id),
+  ];
+}
+
+export function markWorkoutSessionEnded(
+  workouts: WorkoutSession[],
+  sessionId: string,
+  status: Extract<WorkoutStatus, 'completed' | 'discarded'>,
+): WorkoutSession[] {
+  return workouts.map((row) =>
+    row.id === sessionId
+      ? {
+          ...row,
+          status,
+          completed: status === 'completed',
+        }
+      : row,
+  );
+}
 
 export type ActiveSessionNotice = {
   /** The session began on an earlier Asia/Kolkata date than today. */
