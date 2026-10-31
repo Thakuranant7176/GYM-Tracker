@@ -20,13 +20,15 @@ Before editing this repository, read these files in order:
 - Use the existing light theme and muted sage/neutral palette. Avoid unrelated UI redesigns.
 - Use `import.meta.env.BASE_URL` or another Vite base-aware path for assets and authentication redirects that must work on GitHub Pages project sites.
 - Distinguish a missing cloud configuration from a genuine empty account. Never substitute fabricated fitness data.
-- Keep date handling consistent with `Asia/Kolkata` unless the user asks to change it.
+- Keep date handling consistent with `Asia/Kolkata` unless the user asks to change it. Use the helpers in `src/lib.ts`; never use `new Date().getDate()`, `toISOString().slice(0, 10)` on a local date, or the browser's time zone for a record date.
+- The database decides which workout is active (`workout_sessions.status`). Do not reintroduce a browser-held "active session".
+- Calorie maths belongs in `src/calories.ts` only. Exercise and balance values are estimates: label them as such, and keep "not recorded" (null) distinct from 0.
 - Avoid destructive SQL changes. If the schema changes for an already-deployed app, add a migration and explain its order of use.
 
 ## Before calling a task complete
 
 1. Run `pnpm install --frozen-lockfile` from a clean dependency state if available.
-2. Run `pnpm typecheck` (or `pnpm exec tsc -b`) and `pnpm build`.
+2. Run `pnpm typecheck` (or `pnpm exec tsc -b`), `pnpm test`, and `pnpm build`.
 3. Run relevant linting/tests if their native dependencies are available.
 4. If Supabase is configured, test auth, RLS isolation with two accounts, CRUD operations, and cloud persistence. Never claim these checks ran without credentials and actual results.
 5. Update `PROJECT_CONTEXT.md`, `CHANGELOG.md`, and `TODO.md` for every meaningful milestone.

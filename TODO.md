@@ -2,6 +2,16 @@
 
 Status is based on source inspection and tests available in the current review, not assumptions from an earlier completion message.
 
+## P0 — Next concrete actions for the calorie-ring / lifecycle work (2026-10-31)
+
+- [ ] On the Mac: `pnpm install --frozen-lockfile && pnpm typecheck && pnpm test && pnpm build && pnpm lint`. Only typecheck and `pnpm test` have been run on this code.
+- [ ] Review the changes, then commit on a branch. `App.tsx` was reformatted wholesale by a previous AI, so no plain, `-w` or word diff against `cc5336b` is readable; review it feature by feature using the CHANGELOG, or format the `cc5336b` version with the same formatter first. Nothing has been committed, pushed or deployed.
+- [ ] Before the lifecycle migration on the live database, run `select user_id, count(*) from workout_sessions where completed = false group by 1;` to see which legacy unfinished rows will be kept active or marked discarded.
+- [ ] Apply, in order, `supabase/migrations/20261029_workout_lifecycle.sql` then `20261029_calorie_tracking.sql` to a scratch/staging Supabase project first. Neither has been executed anywhere yet.
+- [ ] Run `supabase/tests/lifecycle_and_intake.test.sql` in that project and fix anything it reports (it rolls back; written without a database to run it against).
+- [ ] Then apply to production, deploy the frontend, and walk through checklist items 8–11 in the README (refresh/discard/second device, Add vs Set, midnight rollover, empty-month report).
+- [ ] Set maintenance calories, the balance target and the exercise goal in Settings (or on the dashboard); decide whether your maintenance figure already includes exercise.
+
 ## P0 — Required before relying on the tracker
 
 - [ ] Create/configure Supabase and run `supabase/schema.sql` for a new project (or apply reviewed migrations for an existing project).
@@ -14,11 +24,25 @@ Status is based on source inspection and tests available in the current review, 
 
 ## P1 — Recommended polish
 
+- [ ] Browser-test the rings at ~1200, ~700 and ~390 px widths (3, 2, 1 columns), and the live midnight rollover. No component/browser tests exist yet; a DOM-based test setup would need new dev dependencies.
+- [ ] Cardio "Finish" is not idempotent (a retry after a lost response could insert a second cardio row). Give the timer a client-generated id and insert with `ON CONFLICT DO NOTHING`, as manual calories already do.
+- [ ] The main data load still uses a plain `select *` (PostgREST cap: 1,000 rows) for most tables; only `workout_sets` and the monthly report paginate. Fine for months of use; paginate more tables for years of data.
+- [ ] The Weight/Nutrition forms keep their initial date if left open across midnight (the date field is visible and editable).
+- [ ] Optional: store the strength draft's inputs in the database so unfinished set entries also follow the user across devices (the session itself already does).
+
 - [ ] Verify the deployed dashboard heatmap visually at mobile and desktop widths with real saved entries, including a phone that reports an approximately 800 px CSS viewport.
 - [ ] Test exports with empty and populated records; verify CSV contains enough labels to distinguish record types.
-- [ ] Consider syncing unfinished strength-workout drafts to the cloud if cross-device recovery of an in-progress workout becomes a requirement; current draft recovery is local to the device/browser.
 
-## Completed in the current review
+## Completed 2026-10-31 (code complete; verification as listed above)
+
+- [x] Dashboard rings: estimated exercise calories (goal, remaining, percent, red→green colours), calories consumed (Add vs Set, retry-safe, editable goal) and estimated daily balance (maintenance − intake, configurable target and maintenance, no double counting). Needs migrations to be applied.
+- [x] Midnight (`Asia/Kolkata`) rollover without a refresh; IST-only date maths; sessions attributed to their start date.
+- [x] Monthly report (Markdown + JSON) with provenance labels, gaps, PRs, streaks, balance, and user-data boundaries.
+- [x] Workout lifecycle moved into the database (`in_progress` / `completed` / `discarded`, one active per user, confirmed discard, stale-session handling, legacy-row handling) — SQL written, not executed.
+- [x] 72 unit tests (`pnpm test`); SQL verification script written (`supabase/tests/`).
+- [x] Repaired the inherited uncommitted work, which did not compile.
+
+## Completed in an earlier review (2026-10-27)
 
 - [x] Add persistent AI handoff documentation (`AGENTS.md`, `PROJECT_CONTEXT.md`, `CHANGELOG.md`, `TODO.md`).
 - [x] Add explicit setup-completion state and a migration path, plus visible setup errors.

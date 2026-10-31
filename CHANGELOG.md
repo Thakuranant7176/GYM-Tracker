@@ -2,6 +2,36 @@
 
 All dates use ISO format. Entries distinguish code changes from tests and external setup.
 
+## 2026-10-31 — Calorie rings, daily balance, midnight rollover, monthly report, workout lifecycle
+
+Starting point: branch `gym`, last clean commit `cc5336b`, plus uncommitted work from an earlier AI that was interrupted by a usage limit. Inspection found that tree did not compile, that `App.tsx` had been reformatted wholesale (about 360 very long lines became about 3,900, so diffs against `cc5336b` are unreadable even with `-w`), and that the client called database objects (`start_workout`, `discard_workout`, a four-argument `complete_workout`, a `daily_calorie_totals` table, new `profiles` columns) that existed in no SQL file. The calorie dashboard and report modules from that work were kept in spirit but rewritten (the intake design read-modify-wrote a per-day total and let it silently override the food log; dates used the browser time zone).
+
+### Added
+- `supabase/migrations/20261029_workout_lifecycle.sql`: `status`, `started_at`, `completed_at`, `discarded_at`; legacy backfill; unique partial index (one active session per user); transition-guard/compat trigger; `start_workout`, replaced `complete_workout`, `discard_workout`. `schema.sql` updated to match.
+- `supabase/migrations/20261029_calorie_tracking.sql`: `profiles.daily_exercise_calorie_goal`, `maintenance_calorie_target`, `daily_deficit_target` (signed), `maintenance_includes_exercise`; `calorie_intake_entries` (RLS, client-generated id for idempotency); `set_daily_intake_total`.
+- `src/calories.ts`, `src/CalorieDashboard.tsx`: three rings with goals, remaining, percent, accessible labels, loading/empty/error/missing-migration states, responsive 3/2/1-column layout (container queries).
+- `src/monthlyReport.ts`, report card on the Progress page, `docs/MONTHLY_REPORT_FORMAT.md`.
+- `src/workoutLifecycle.ts`, `src/midnight.ts`, `src/hooks.ts`, `src/intake.ts`, `src/dbErrors.ts`, `src/fetchAll.ts`.
+- `tests/` (72 tests), `tsconfig.test.json`, `scripts/`, `pnpm test`; `supabase/tests/lifecycle_and_intake.test.sql`.
+
+### Changed
+- `src/lib.ts`: all date helpers are fixed-offset IST arithmetic, independent of the browser time zone; `downloadFile` no longer revokes its URL immediately; heatmap scoring counts only completed strength sessions.
+- `src/App.tsx`: silent background refresh (no unmount, no wiping data on a failed query, stale responses ignored), refresh on tab focus/reconnect/5 min, midnight rollover with Dashboard remount, migration banner, workout page derives the active session from database rows (`LiveWorkout` keyed by session id; confirmed discard; no false success), "Resume workout" on the dashboard, cardio default date follows midnight, Settings goal validation (signed balance target, whole numbers, guarded when columns are missing), intake entries included in the full export, `workout_sets` loaded with pagination.
+
+### Fixed
+- Missing `}` in the Settings deficit input and undeclared `refresh`/`inform` in `Dashboard` (the tree did not compile).
+- The unfinished-workout bug: "active" was held in browser storage while the database had only `completed = false`, so orphaned or cross-device sessions could not be seen, discarded or replaced. The database is now authoritative.
+- Pages used `todayISO()` captured at navigation, so a page left open past midnight could file new work under yesterday.
+
+### Validation
+- `tsc -b` (typecheck): passed (exit 0).
+- `pnpm test`: 72 passed, 0 failed.
+- `pnpm build`, `pnpm lint`: **not run** — dependencies in the sandbox are macOS ARM64 builds; Linux native bindings and network were unavailable.
+- Migrations, SQL functions, trigger, unique index and RLS on the new table: **not executed** (no Postgres/Supabase available). Supabase persistence and cross-device behaviour: **not verified**.
+
+### Outstanding
+See the first section of `TODO.md`.
+
 ## 2026-10-27 — Archive review and onboarding/deployment fixes
 
 ### Added / changed

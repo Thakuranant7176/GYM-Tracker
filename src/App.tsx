@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { Session } from "@supabase/supabase-js";
 import {
   Activity,
@@ -34,7 +34,22 @@ import {
 } from "recharts";
 import "./App.css";
 import { CalorieDashboard } from "./CalorieDashboard";
+import { describeDbError, isMissingSchemaError, MIGRATIONS } from "./dbErrors";
+import { fetchAllRows } from "./fetchAll";
+import { useToday, useVisibleRefresh } from "./hooks";
 import { buildMonthlyReport, monthlyReportMarkdown } from "./monthlyReport";
+import {
+  browserStorage,
+  clearDraft,
+  describeActiveSession,
+  endedElsewhereMessage,
+  findActiveSession,
+  isCompletedSession,
+  loadDraft,
+  saveDraft,
+  sessionDateFor,
+  whyWorkoutEnded,
+} from "./workoutLifecycle";
 import { DEFAULT_PLAN, MUSCLES } from "./defaultPlan";
 import {
   activityScore,
@@ -44,8 +59,10 @@ import {
   formatDate,
   isoFromDate,
   minuteLabel,
+  monthOf,
   number,
   sameWeek,
+  shiftMonth,
   startOfMonth,
   startOfWeek,
   todayISO,
@@ -55,8 +72,8 @@ import {
 import { isSupabaseConfigured, supabase } from "./supabase";
 import type {
   ActivityScoring,
+  CalorieIntakeEntry,
   CardioSession,
-  DailyCalorieTotal,
   Equipment,
   Exercise,
   FoodEntry,
@@ -290,16 +307,23 @@ function AuthScreen() {
 }
 
 function Tracker({ session }: { session: Session }) {
+  // The Asia/Kolkata date, kept current while the tab stays open (see hooks.ts).
+  const today = useToday();
   const [page, setPage] = useState<Page>("dashboard");
-  const [logDate, setLogDate] = useState(todayISO());
-  const navigate = (nextPage: Page, date = todayISO()) => {
-    setLogDate(date);
+  // A date picked explicitly from the calendar ("log strength for 12 Oct"). null means
+  // "today", resolved at the moment it is used, so a page left open past midnight never
+  // files new work under yesterday.
+  const [logDate, setLogDate] = useState<string | null>(null);
+  const navigate = (nextPage: Page, date?: string) => {
+    setLogDate(date ?? null);
     setPage(nextPage);
   };
   const [profile, setProfile] = useState<Profile | null>(null);
   const [weights, setWeights] = useState<WeightEntry[]>([]);
   const [foods, setFoods] = useState<FoodEntry[]>([]);
-  const [manualTotals, setManualTotals] = useState<DailyCalorieTotal[]>([]);
+  const [quickEntries, setQuickEntries] = useState<CalorieIntakeEntry[]>([]);
+  const [intakeAvailable, setIntakeAvailable] = useState(true);
+  const [migrationNotes, setMigrationNotes] = useState<string[]>([]);
   const [cardio, setCardio] = useState<CardioSession[]>([]);
   const [gyms, setGyms] = useState<Gym[]>([]);
   const [equipment, setEquipment] = useState<Equipment[]>([]);
@@ -311,12 +335,16 @@ function Tracker({ session }: { session: Session }) {
   const [loading, setLoading] = useState(true);
   const [toast, setToast] = useState<Toast>(null);
   const [mobileOpen, setMobileOpen] = useState(false);
+  const loadSequence = useRef(0);
 
   const inform = (type: "success" | "error", message: string) =>
     setToast({ type, message });
-  const load = async () => {
-    setLoading(true);
-    const [p, w, f, mt, c, g, eq, ex, pl, pe, ws, st] = await Promise.all([
+  // `silent` refreshes keep the screen mounted (no loading flash, no lost form state) and
+  // never replace good data with an empty result when a query fails, e.g. while offline.
+  const load = async ({ silent = false }: { silent?: boolean } = {}) => {
+    const sequence = ++loadSequence.current;
+    if (!silent) setLoading(true);
+    const [p, w, f, qi, c, g, eq, ex, pl, pe, ws, st] = await Promise.all([
       supabase!.from("profiles").select("*").maybeSingle(),
       supabase!.from("weight_entries").select("*").order("entry_date"),
       supabase!
@@ -324,7 +352,7 @@ function Tracker({ session }: { session: Session }) {
         .select("*")
         .order("entry_date", { ascending: false }),
       supabase!
-        .from("daily_calorie_totals")
+        .from("calorie_intake_entries")
         .select("*")
         .order("entry_date", { ascending: false }),
       supabase!
@@ -340,29 +368,64 @@ function Tracker({ session }: { session: Session }) {
         .from("workout_sessions")
         .select("*")
         .order("session_date", { ascending: false }),
-      supabase!.from("workout_sets").select("*").order("set_number"),
+      fetchAllRows<WorkoutSet>("workout_sets"),
     ]);
-    const issue = [p, w, f, mt, c, g, eq, ex, pl, pe, ws, st].find(
+    // A newer load started while this one was in flight; its result is the fresher one.
+    if (sequence !== loadSequence.current) return;
+    const intakeMissing = isMissingSchemaError(qi.error);
+    const issue = [p, w, f, c, g, eq, ex, pl, pe, ws, st].find(
       (r) => r.error,
     )?.error;
-    if (issue) inform("error", issue.message);
-    setProfile((p.data as Profile | null) ?? null);
-    setWeights((w.data as WeightEntry[]) ?? []);
-    setFoods((f.data as FoodEntry[]) ?? []);
-    setManualTotals((mt.data as DailyCalorieTotal[]) ?? []);
-    setCardio((c.data as CardioSession[]) ?? []);
-    setGyms((g.data as Gym[]) ?? []);
-    setEquipment((eq.data as Equipment[]) ?? []);
-    setExercises((ex.data as Exercise[]) ?? []);
-    setPlans((pl.data as WorkoutPlan[]) ?? []);
-    setPlanExercises((pe.data as PlanExercise[]) ?? []);
-    setWorkouts((ws.data as WorkoutSession[]) ?? []);
-    setSets((st.data as WorkoutSet[]) ?? []);
+    if (issue && !silent) inform("error", issue.message);
+    const take = <T,>(
+      result: { data: T[] | null; error: unknown },
+      set: (rows: T[]) => void,
+    ) => {
+      if (!result.error) set(result.data ?? []);
+    };
+    if (!p.error) setProfile((p.data as Profile | null) ?? null);
+    take(w as { data: WeightEntry[] | null; error: unknown }, setWeights);
+    take(f as { data: FoodEntry[] | null; error: unknown }, setFoods);
+    if (!qi.error) setQuickEntries((qi.data as CalorieIntakeEntry[]) ?? []);
+    setIntakeAvailable(!intakeMissing);
+    take(c as { data: CardioSession[] | null; error: unknown }, setCardio);
+    take(g as { data: Gym[] | null; error: unknown }, setGyms);
+    take(eq as { data: Equipment[] | null; error: unknown }, setEquipment);
+    take(ex as { data: Exercise[] | null; error: unknown }, setExercises);
+    take(pl as { data: WorkoutPlan[] | null; error: unknown }, setPlans);
+    take(pe as { data: PlanExercise[] | null; error: unknown }, setPlanExercises);
+    take(ws as { data: WorkoutSession[] | null; error: unknown }, setWorkouts);
+    take(st as { data: WorkoutSet[] | null; error: unknown }, setSets);
+    // Say which migrations the hosted database is still missing instead of failing quietly.
+    const pending = new Set<string>();
+    if (intakeMissing) pending.add(MIGRATIONS.calories);
+    if (p.data && !("maintenance_includes_exercise" in p.data))
+      pending.add(MIGRATIONS.calories);
+    if (
+      Array.isArray(ws.data) &&
+      ws.data.length > 0 &&
+      ws.data.some((row) => !("status" in row))
+    )
+      pending.add(MIGRATIONS.lifecycle);
+    if (!p.error && !ws.error) setMigrationNotes([...pending]);
     setLoading(false);
   };
+  const refresh = () => load({ silent: true });
   useEffect(() => {
-    load();
+    void load();
   }, []);
+  // Pick up changes made on another device when this tab is shown again, regains focus,
+  // reconnects, or every few minutes while visible.
+  useVisibleRefresh(() => {
+    void load({ silent: true });
+  });
+  // New day: totals switch to the new date and fresh data is pulled so every device agrees.
+  const lastSeenDay = useRef(today);
+  useEffect(() => {
+    if (lastSeenDay.current === today) return;
+    lastSeenDay.current = today;
+    void load({ silent: true });
+  }, [today]);
   useEffect(() => {
     if (toast) {
       const id = window.setTimeout(() => setToast(null), 5000);
@@ -373,7 +436,7 @@ function Tracker({ session }: { session: Session }) {
     profile: profile as Profile,
     weights,
     foods,
-    manualTotals,
+    quickEntries,
     cardio,
     gyms,
     equipment,
@@ -453,7 +516,7 @@ function Tracker({ session }: { session: Session }) {
           </button>
           <div>
             <p className="eyebrow">
-              {formatDate(todayISO(), {
+              {formatDate(today, {
                 weekday: "long",
                 day: "numeric",
                 month: "long",
@@ -476,25 +539,47 @@ function Tracker({ session }: { session: Session }) {
             {toast.message}
           </div>
         )}
+        {migrationNotes.length > 0 && (
+          <div className="migration-banner" role="status">
+            <strong>Database update needed</strong>
+            Some features need migrations that have not been applied to your
+            Supabase project yet. Run these in the SQL editor, in this order,
+            then reload:{" "}
+            {[...migrationNotes]
+              .sort()
+              .map((file) => (
+                <code key={file}>{file}</code>
+              ))
+              .reduce<React.ReactNode[]>(
+                (list, node, index) =>
+                  index === 0 ? [node] : [...list, " → ", node],
+                [],
+              )}
+          </div>
+        )}
         {page === "dashboard" && (
           <Dashboard
+            key={today}
             data={data}
+            today={today}
+            intakeAvailable={intakeAvailable}
             setPage={navigate}
             openLog={navigate}
-            refresh={load}
+            refresh={refresh}
             inform={inform}
           />
         )}
         {page === "weight" && (
-          <WeightPage data={data} refresh={load} inform={inform} />
+          <WeightPage data={data} refresh={refresh} inform={inform} />
         )}
         {page === "nutrition" && (
-          <NutritionPage data={data} refresh={load} inform={inform} />
+          <NutritionPage data={data} refresh={refresh} inform={inform} />
         )}
         {page === "cardio" && (
           <CardioPage
             data={data}
-            refresh={load}
+            today={today}
+            refresh={refresh}
             inform={inform}
             initialDate={logDate}
           />
@@ -502,14 +587,17 @@ function Tracker({ session }: { session: Session }) {
         {page === "workout" && (
           <WorkoutPage
             data={data}
-            refresh={load}
+            today={today}
+            refresh={refresh}
             inform={inform}
             initialDate={logDate}
           />
         )}
-        {page === "progress" && <ProgressPage data={data} />}
+        {page === "progress" && (
+          <ProgressPage data={data} today={today} inform={inform} />
+        )}
         {page === "settings" && (
-          <SettingsPage data={data} refresh={load} inform={inform} />
+          <SettingsPage data={data} refresh={refresh} inform={inform} />
         )}
       </main>
     </div>
@@ -521,7 +609,7 @@ interface AppData {
   profile: Profile;
   weights: WeightEntry[];
   foods: FoodEntry[];
-  manualTotals: DailyCalorieTotal[];
+  quickEntries: CalorieIntakeEntry[];
   cardio: CardioSession[];
   gyms: Gym[];
   equipment: Equipment[];
@@ -830,27 +918,32 @@ async function seedDefaultPlan(userId: string) {
 
 function Dashboard({
   data,
+  today,
+  intakeAvailable,
   setPage,
   openLog,
+  refresh,
+  inform,
 }: {
   data: AppData;
+  today: string;
+  intakeAvailable: boolean;
   setPage: (page: Page) => void;
   openLog: (page: Page, date?: string) => void;
   refresh: () => Promise<void>;
   inform: (type: "success" | "error", message: string) => void;
 }) {
-  const [calendarEnd, setCalendarEnd] = useState(todayISO());
-  const [selectedDate, setSelectedDate] = useState(todayISO());
-  const todayPlan = data.plans.find(
-    (plan) => plan.weekday === weekday(todayISO()),
-  );
+  const [calendarEnd, setCalendarEnd] = useState(today);
+  const [selectedDate, setSelectedDate] = useState(today);
+  const todayPlan = data.plans.find((plan) => plan.weekday === weekday(today));
+  const activeWorkout = findActiveSession(data.workouts);
   const todayCardio = data.cardio
-    .filter((item) => item.session_date === todayISO())
+    .filter((item) => item.session_date === today)
     .reduce((sum, item) => sum + item.active_seconds, 0);
-  const weekStart = startOfWeek();
+  const weekStart = startOfWeek(today);
   const completedWeek = data.workouts.filter(
     (item) =>
-      item.completed &&
+      isCompletedSession(item) &&
       item.session_date >= weekStart &&
       item.session_date <= addDays(weekStart, 6),
   ).length;
@@ -889,22 +982,31 @@ function Dashboard({
         </div>
         <button
           className="primary"
-          onClick={() => setPage(todayPlan?.is_rest_day ? "cardio" : "workout")}
+          onClick={() =>
+            setPage(
+              activeWorkout || !todayPlan?.is_rest_day ? "workout" : "cardio",
+            )
+          }
         >
-          {todayPlan?.is_rest_day ? "Log activity" : "Start workout"}
+          {activeWorkout
+            ? "Resume workout"
+            : todayPlan?.is_rest_day
+              ? "Log activity"
+              : "Start workout"}
         </button>
       </section>
       <CalorieDashboard
         userId={data.userId}
+        today={today}
         profile={data.profile}
         weights={data.weights}
         foods={data.foods}
-        manualTotals={data.manualTotals}
+        quickEntries={data.quickEntries}
         cardio={data.cardio}
         workouts={data.workouts}
+        intakeAvailable={intakeAvailable}
         refresh={refresh}
         inform={inform}
-        openSettings={() => setPage("settings")}
       />
       <section className="stat-grid">
         <StatCard
@@ -1777,15 +1879,19 @@ function NutritionPage({
 
 function CardioPage({
   data,
+  today,
   refresh,
   inform,
-  initialDate,
+  initialDate: requestedDate,
 }: {
   data: AppData;
+  today: string;
   refresh: () => Promise<void>;
   inform: (type: "success" | "error", message: string) => void;
-  initialDate: string;
+  initialDate: string | null;
 }) {
+  // An explicit calendar date wins; otherwise "today" follows the Asia/Kolkata midnight.
+  const initialDate = requestedDate ?? today;
   const key = `gym-ledger-timer-${data.userId}`;
   const [timer, setTimer] = useState<TimerState | null>(null);
   const [tick, setTick] = useState(0);
@@ -1802,6 +1908,19 @@ function CardioPage({
   });
   const [editing, setEditing] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // If the form still holds the previous default day when midnight passes, move it to the
+  // new day. A date the user chose on purpose is never touched.
+  const previousDefault = useRef(initialDate);
+  useEffect(() => {
+    const before = previousDefault.current;
+    previousDefault.current = initialDate;
+    if (before === initialDate) return;
+    setForm((current) =>
+      current.session_date === before
+        ? { ...current, session_date: initialDate }
+        : current,
+    );
+  }, [initialDate]);
   useEffect(() => {
     try {
       const saved = localStorage.getItem(key);
@@ -2259,94 +2378,47 @@ function createWorkoutDrafts(workoutPlanId: string | null, data: AppData): Draft
     );
 }
 
-function WorkoutPage({
+function LiveWorkout({
+  session: active,
   data,
+  today,
   refresh,
   inform,
-  initialDate,
+  onEnded,
 }: {
+  session: WorkoutSession;
   data: AppData;
+  today: string;
   refresh: () => Promise<void>;
   inform: (type: "success" | "error", message: string) => void;
-  initialDate: string;
+  onEnded: () => void;
 }) {
-  const draftKey = `gym-ledger-workout-draft-${data.userId}`;
-  const [savedDraft] = useState(() => {
-    try {
-      const raw = localStorage.getItem(draftKey);
-      if (!raw) return null;
-      const parsed = JSON.parse(raw) as {
-        active?: WorkoutSession;
-        drafts?: DraftSet[];
-        notes?: string;
-      };
-      return parsed.active?.id && Array.isArray(parsed.drafts) ? parsed : null;
-    } catch {
-      return null;
-    }
-  });
-  const storedActive = savedDraft?.active
-    ? (data.workouts.find(
-        (session) =>
-          session.id === savedDraft.active?.id &&
-          session.status === "in_progress",
-      ) ?? null)
-    : null;
-  const remoteActive = data.workouts.find(
-    (session) => session.status === "in_progress",
-  ) ?? null;
-  const initialActive = storedActive ?? remoteActive;
-  const [active, setActive] = useState<WorkoutSession | null>(
-    () => initialActive,
+  // Browser storage holds ONLY the set inputs typed so far, and only for the session the
+  // database says is active (this component is keyed by that session's id).
+  const storage = browserStorage();
+  const [restored] = useState(() =>
+    loadDraft<DraftSet>(storage, data.userId, active.id),
   );
   const [drafts, setDrafts] = useState<DraftSet[]>(
-    () =>
-      storedActive && savedDraft?.drafts
-        ? savedDraft.drafts
-        : initialActive
-          ? createWorkoutDrafts(initialActive.workout_plan_id, data)
-          : [],
+    () => restored?.drafts ?? createWorkoutDrafts(active.workout_plan_id, data),
   );
-  const [notes, setNotes] = useState(() =>
-    storedActive ? (savedDraft?.notes ?? "") : "",
-  );
+  const [notes, setNotes] = useState(() => restored?.notes ?? "");
   const [saving, setSaving] = useState(false);
+  const busy = useRef(false);
+  const ended = useRef(false);
   useEffect(() => {
-    if (active)
-      localStorage.setItem(draftKey, JSON.stringify({ active, drafts, notes }));
-    else localStorage.removeItem(draftKey);
-  }, [draftKey, active, drafts, notes]);
-  const planItems = active
-    ? data.planExercises.filter(
-        (item) => item.workout_plan_id === active.workout_plan_id,
-      )
-    : [];
-  const start = async (plan: WorkoutPlan) => {
-    if (plan.is_rest_day)
-      return inform(
-        "error",
-        "Sunday is configured as rest. Log optional cardio instead, or change the plan in Settings.",
-      );
-    setSaving(true);
-    const { data: result, error } = await supabase!
-      .rpc("start_workout", {
-        p_workout_plan_id: plan.id,
-        p_session_date: initialDate,
-        p_title: plan.name,
-      });
-    setSaving(false);
-    if (error) return inform("error", error.message);
-    const session = result as WorkoutSession;
-    setActive(session);
-    setDrafts(createWorkoutDrafts(session.workout_plan_id, data));
-    setNotes("");
-    if (session.workout_plan_id !== plan.id)
-      inform(
-        "success",
-        "An existing workout was restored. Discard it explicitly before starting another routine.",
-      );
-    await refresh();
-  };
+    if (!ended.current)
+      saveDraft(storage, data.userId, active.id, drafts, notes);
+  }, [storage, data.userId, active.id, drafts, notes]);
+  const notice = describeActiveSession(
+    active,
+    today,
+    data.plans,
+    weekday(today),
+  );
+  const planItems = data.planExercises.filter(
+    (item) => item.workout_plan_id === active.workout_plan_id,
+  );
   const changeDraft = (key: string, patch: Partial<DraftSet>) =>
     setDrafts((current) =>
       current.map((item) => (item.key === key ? { ...item, ...patch } : item)),
@@ -2372,8 +2444,10 @@ function WorkoutPage({
     });
   const removeSet = (key: string) =>
     setDrafts((current) => current.filter((item) => item.key !== key));
+  // The database is the source of truth. Success is reported only after the database
+  // confirms, and a failure leaves the workout active exactly as it was.
   const finish = async () => {
-    if (!active) return;
+    if (busy.current) return;
     const completed = drafts.filter((item) => item.completed);
     if (
       !completed.length &&
@@ -2382,91 +2456,116 @@ function WorkoutPage({
       )
     )
       return;
+    busy.current = true;
     setSaving(true);
-    const lines = drafts
-      .filter(
-        (item) => item.completed || item.reps || item.weight || item.duration,
-      )
-      .map((item) => ({
-        exercise_id: item.exerciseId,
-        set_number: item.setNumber,
-        reps: item.reps || null,
-        weight_kg: item.weight || null,
-        duration_seconds: item.duration || null,
-        side: item.side || null,
-        completed: item.completed,
-        notes: item.notes || null,
-      }));
-    const { error } = await supabase!.rpc("complete_workout", {
-      p_workout_session_id: active.id,
-      p_notes: notes || null,
-      p_sets: lines,
-      p_duration_minutes: active.started_at ?? active.created_at
-        ? Math.max(
-            1,
-            Math.round(
-              (Date.now() - new Date(active.started_at ?? active.created_at!).getTime()) /
-                60000,
-            ),
-          )
-        : null,
-    });
-    setSaving(false);
-    if (error) return inform("error", error.message);
-    setActive(null);
-    setDrafts([]);
-    inform(
-      "success",
-      "Workout saved. Your calendar and performance records will update now.",
-    );
-    await refresh();
+    try {
+      const lines = drafts
+        .filter(
+          (item) => item.completed || item.reps || item.weight || item.duration,
+        )
+        .map((item) => ({
+          exercise_id: item.exerciseId,
+          set_number: item.setNumber,
+          reps: item.reps || null,
+          weight_kg: item.weight || null,
+          duration_seconds: item.duration || null,
+          side: item.side || null,
+          completed: item.completed,
+          notes: item.notes || null,
+        }));
+      const { error } = await supabase!.rpc("complete_workout", {
+        p_workout_session_id: active.id,
+        p_notes: notes || null,
+        p_sets: lines,
+      });
+      if (error) {
+        inform("error", describeDbError(error, MIGRATIONS.lifecycle));
+        // The session may have been discarded or finished on another device.
+        if (/discarded|not found|no longer/i.test(error.message))
+          await refresh();
+        return;
+      }
+      ended.current = true;
+      clearDraft(storage, data.userId);
+      onEnded();
+      inform(
+        "success",
+        "Workout saved. Your calendar and performance records will update now.",
+      );
+      await refresh();
+    } finally {
+      busy.current = false;
+      setSaving(false);
+    }
   };
-  const cancel = async () => {
-    if (!active || !window.confirm("Discard this unfinished workout?")) return;
-    const { error } = await supabase!.rpc("discard_workout", {
-      p_workout_session_id: active.id,
-    });
-    if (error) return inform("error", error.message);
-    setActive(null);
-    setDrafts([]);
-    setNotes("");
-    inform(
-      "success",
-      "Unfinished workout discarded. Completed workout history was not changed.",
-    );
-    await refresh();
-  };
-  const removeSession = async (id: string) => {
+  const discard = async () => {
+    if (busy.current) return;
     if (
       !window.confirm(
-        "Delete this completed workout and its recorded sets? This cannot be undone.",
+        "Discard this unfinished workout? The sets you have entered for it will be lost. Your completed workout history is not affected.",
       )
     )
       return;
-    const { error } = await supabase!
-      .from("workout_sessions")
-      .delete()
-      .eq("id", id);
-    if (error) return inform("error", error.message);
-    inform("success", "Workout record deleted.");
-    await refresh();
+    busy.current = true;
+    setSaving(true);
+    try {
+      const { error } = await supabase!.rpc("discard_workout", {
+        p_workout_session_id: active.id,
+      });
+      if (error) {
+        inform("error", describeDbError(error, MIGRATIONS.lifecycle));
+        return;
+      }
+      ended.current = true;
+      clearDraft(storage, data.userId);
+      onEnded();
+      inform(
+        "success",
+        "Unfinished workout discarded. Completed workout history was not changed.",
+      );
+      await refresh();
+    } finally {
+      busy.current = false;
+      setSaving(false);
+    }
   };
-  if (active)
-    return (
+  return (
       <div className="page workout-page">
+        {notice.needsAttention && (
+          <div className="workout-banner" role="status">
+            <strong>This workout is still open</strong>
+            It{" "}
+            {notice.startedOnEarlierDay
+              ? `started on ${formatDate(active.session_date)}`
+              : `has been open for ${notice.hoursOpen ?? "several"} hours`}
+            . Complete it to save what you actually did, or discard it to free
+            up the slot for a new workout.
+          </div>
+        )}
         <div className="section-heading">
           <div>
             <p className="eyebrow">Live workout</p>
             <h2>{active.title}</h2>
             <p className="muted">
-              Session date: {formatDate(active.session_date)}. If this crossed
-              midnight, it remains attached to the date on which it started.
-              Mark only actual completed sets.
+              Session date: {formatDate(active.session_date)}. If this crosses
+              midnight it stays attached to the date on which it started. Mark
+              only sets you actually completed. Only one workout can be active
+              at a time — to start a different routine, complete or discard
+              this one first.
             </p>
+            {notice.differsFromTodaysRoutine && (
+              <p className="muted">
+                Today’s scheduled routine is different from this one.
+              </p>
+            )}
           </div>
           <div className="workout-top-actions">
             <RestTimer />
-            <button className="danger-button" onClick={cancel}>
+            <button
+              className="danger-button"
+              disabled={saving}
+              onClick={() => void discard()}
+            >
               Discard workout
             </button>
           </div>
@@ -2603,11 +2702,107 @@ function WorkoutPage({
               kg training volume
             </span>
           </div>
-          <button className="primary" disabled={saving} onClick={finish}>
+          <button className="primary" disabled={saving} onClick={() => void finish()}>
             {saving ? "Saving…" : "Complete workout"}
           </button>
         </section>
       </div>
+    );
+}
+
+function WorkoutPage({
+  data,
+  today,
+  refresh,
+  inform,
+  initialDate,
+}: {
+  data: AppData;
+  today: string;
+  refresh: () => Promise<void>;
+  inform: (type: "success" | "error", message: string) => void;
+  initialDate: string | null;
+}) {
+  // The active workout is whatever the database says it is. There is deliberately no
+  // browser-held "active session" state that could drift out of step with it.
+  const active = findActiveSession(data.workouts);
+  const [saving, setSaving] = useState(false);
+  const starting = useRef(false);
+  const endedHere = useRef(false);
+  const lastActiveId = useRef<string | null>(active?.id ?? null);
+  useEffect(() => {
+    const previous = lastActiveId.current;
+    lastActiveId.current = active?.id ?? null;
+    if (active) return;
+    // No active session: any stored draft belongs to a workout that has ended.
+    clearDraft(browserStorage(), data.userId);
+    if (previous) {
+      if (endedHere.current) endedHere.current = false;
+      else
+        inform(
+          "error",
+          endedElsewhereMessage[whyWorkoutEnded(previous, data.workouts)],
+        );
+    }
+  }, [active, data.userId, data.workouts, inform]);
+  const start = async (plan: WorkoutPlan) => {
+    if (starting.current) return;
+    if (plan.is_rest_day)
+      return inform(
+        "error",
+        "Sunday is configured as rest. Log optional cardio instead, or change the plan in Settings.",
+      );
+    starting.current = true;
+    setSaving(true);
+    try {
+      // The server returns the existing active session if there is one, so a double tap,
+      // a retry or a second device can never create two.
+      const { data: result, error } = await supabase!.rpc("start_workout", {
+        p_workout_plan_id: plan.id,
+        p_session_date: sessionDateFor(initialDate),
+        p_title: plan.name,
+      });
+      if (error) return inform("error", describeDbError(error, MIGRATIONS.lifecycle));
+      const session = result as WorkoutSession;
+      if (session.workout_plan_id !== plan.id)
+        inform(
+          "success",
+          "A workout was already in progress, so it was restored. Complete or discard it before starting another routine.",
+        );
+      await refresh();
+    } finally {
+      starting.current = false;
+      setSaving(false);
+    }
+  };
+  const removeSession = async (id: string) => {
+    if (
+      !window.confirm(
+        "Delete this completed workout and its recorded sets? This cannot be undone.",
+      )
+    )
+      return;
+    const { error } = await supabase!
+      .from("workout_sessions")
+      .delete()
+      .eq("id", id);
+    if (error) return inform("error", error.message);
+    inform("success", "Workout record deleted.");
+    await refresh();
+  };
+  if (active)
+    return (
+      <LiveWorkout
+        key={active.id}
+        session={active}
+        data={data}
+        today={today}
+        refresh={refresh}
+        inform={inform}
+        onEnded={() => {
+          endedHere.current = true;
+        }}
+      />
     );
   return (
     <div className="page workout-page">
@@ -2630,7 +2825,7 @@ function WorkoutPage({
             );
             return (
               <article
-                className={`routine-card ${plan.weekday === weekday(todayISO()) ? "today" : ""}`}
+                className={`routine-card ${plan.weekday === weekday(today) ? "today" : ""}`}
                 key={plan.id}
               >
                 <p className="eyebrow">
@@ -2669,7 +2864,7 @@ function WorkoutPage({
                     <button
                       className="primary"
                       disabled={saving}
-                      onClick={() => start(plan)}
+                      onClick={() => void start(plan)}
                     >
                       {saving ? "Preparing…" : "Start this workout"}
                     </button>
@@ -2686,10 +2881,10 @@ function WorkoutPage({
             <h2>Completed workouts</h2>
           </div>
         </div>
-        {data.workouts.filter((item) => item.completed).length ? (
+        {data.workouts.filter((item) => isCompletedSession(item)).length ? (
           <div className="data-list">
             {data.workouts
-              .filter((item) => item.completed)
+              .filter((item) => isCompletedSession(item))
               .map((item) => {
                 const count = data.sets.filter(
                   (set) => set.workout_session_id === item.id && set.completed,
@@ -2789,8 +2984,16 @@ function RestTimer() {
   );
 }
 
-function ProgressPage({ data }: { data: AppData }) {
-  const rangeStart = addDays(todayISO(), -83);
+function ProgressPage({
+  data,
+  today,
+  inform,
+}: {
+  data: AppData;
+  today: string;
+  inform: (type: "success" | "error", message: string) => void;
+}) {
+  const rangeStart = addDays(today, -83);
   const days = Array.from({ length: 12 }, (_, index) =>
     addDays(startOfWeek(rangeStart), index * 7),
   );
@@ -2819,7 +3022,7 @@ function ProgressPage({ data }: { data: AppData }) {
   ]);
   let streak = 0;
   for (let i = 0; i < 365; i++) {
-    const day = addDays(todayISO(), -i);
+    const day = addDays(today, -i);
     const plan = data.plans.find((item) => item.weekday === weekday(day));
     if (plan?.is_rest_day) continue;
     if (!activeDates.has(day)) break;
@@ -2995,7 +3198,185 @@ function ProgressPage({ data }: { data: AppData }) {
           )}
         </article>
       </section>
+      <MonthlyReportCard data={data} today={today} inform={inform} />
     </div>
+  );
+}
+
+function MonthlyReportCard({
+  data,
+  today,
+  inform,
+}: {
+  data: AppData;
+  today: string;
+  inform: (type: "success" | "error", message: string) => void;
+}) {
+  const currentMonth = monthOf(today);
+  const [month, setMonth] = useState(() => shiftMonth(currentMonth, -1));
+  const [busy, setBusy] = useState<"json" | "md" | null>(null);
+  const earliest = [
+    ...data.workouts.map((row) => row.session_date),
+    ...data.cardio.map((row) => row.session_date),
+    ...data.foods.map((row) => row.entry_date),
+    ...data.weights.map((row) => row.entry_date),
+    ...data.quickEntries.map((row) => row.entry_date),
+  ].sort()[0];
+  const firstYear = Math.min(
+    Number((earliest ?? today).slice(0, 4)),
+    Number(month.slice(0, 4)),
+  );
+  const lastYear = Number(currentMonth.slice(0, 4));
+  const years = Array.from(
+    { length: lastYear - firstYear + 1 },
+    (_, index) => firstYear + index,
+  );
+  const pick = (year: number, monthNumber: number) => {
+    const next = `${year}-${String(monthNumber).padStart(2, "0")}`;
+    setMonth(next > currentMonth ? currentMonth : next);
+  };
+  const download = async (format: "json" | "md") => {
+    if (busy) return;
+    setBusy(format);
+    try {
+      // Read fresh, complete data for this signed-in user (Row Level Security applies);
+      // the on-screen copy may be stale or capped at 1,000 rows per table.
+      const [w, f, qi, c, ws, st, ex] = await Promise.all([
+        fetchAllRows<WeightEntry>("weight_entries"),
+        fetchAllRows<FoodEntry>("food_entries"),
+        fetchAllRows<CalorieIntakeEntry>("calorie_intake_entries"),
+        fetchAllRows<CardioSession>("cardio_sessions"),
+        fetchAllRows<WorkoutSession>("workout_sessions"),
+        fetchAllRows<WorkoutSet>("workout_sets"),
+        fetchAllRows<Exercise>("exercises"),
+      ]);
+      const quickMissing = isMissingSchemaError(qi.error);
+      const failed = [w, f, c, ws, st, ex].find((result) => result.error);
+      if (failed?.error || (qi.error && !quickMissing))
+        return inform(
+          "error",
+          `The report could not be built because your records could not be read: ${(failed?.error ?? qi.error)?.message}`,
+        );
+      const report = buildMonthlyReport(
+        {
+          userId: data.userId,
+          profile: data.profile,
+          weights: w.data ?? [],
+          foods: f.data ?? [],
+          quickEntries: quickMissing ? [] : (qi.data ?? []),
+          cardio: c.data ?? [],
+          workouts: ws.data ?? [],
+          sets: st.data ?? [],
+          exercises: ex.data ?? [],
+        },
+        month,
+        { asOfDate: today },
+      );
+      if (format === "json")
+        downloadFile(
+          `gym-ledger-report-${month}.json`,
+          JSON.stringify(report, null, 2),
+          "application/json",
+        );
+      else
+        downloadFile(
+          `gym-ledger-report-${month}.md`,
+          monthlyReportMarkdown(report),
+          "text/markdown",
+        );
+      const empty =
+        report.overview.recorded.training_days === 0 &&
+        report.overview.recorded.weigh_ins === 0 &&
+        report.overview.recorded.days_with_calorie_intake_recorded === 0;
+      inform(
+        "success",
+        `${empty ? "No records exist for this month, so the report lists the data gaps only. " : ""}Report downloaded.${quickMissing ? " Manual calorie entries were left out because the calorie migration has not been applied." : ""}`,
+      );
+    } catch (error) {
+      inform(
+        "error",
+        error instanceof Error ? error.message : "The report failed.",
+      );
+    } finally {
+      setBusy(null);
+    }
+  };
+  const year = Number(month.slice(0, 4));
+  const monthNumber = Number(month.slice(5));
+  return (
+    <section className="list-card report-card" aria-labelledby="report-heading">
+      <div className="section-heading">
+        <div>
+          <p className="eyebrow">Monthly report</p>
+          <h2 id="report-heading">Download a month</h2>
+          <p className="muted">
+            Your own data only. Recorded values and estimates are labelled
+            separately, and days with no data are shown as gaps — never as zero.
+          </p>
+        </div>
+      </div>
+      <div className="report-controls">
+        <label>
+          Month
+          <select
+            value={monthNumber}
+            onChange={(event) => pick(year, Number(event.target.value))}
+          >
+            {Array.from({ length: 12 }, (_, index) => index + 1).map(
+              (value) => (
+                <option
+                  key={value}
+                  value={value}
+                  disabled={
+                    `${year}-${String(value).padStart(2, "0")}` > currentMonth
+                  }
+                >
+                  {new Intl.DateTimeFormat("en-IN", {
+                    month: "long",
+                    timeZone: "UTC",
+                  }).format(new Date(Date.UTC(2000, value - 1, 1)))}
+                </option>
+              ),
+            )}
+          </select>
+        </label>
+        <label>
+          Year
+          <select
+            value={year}
+            onChange={(event) => pick(Number(event.target.value), monthNumber)}
+          >
+            {years.map((value) => (
+              <option key={value} value={value}>
+                {value}
+              </option>
+            ))}
+          </select>
+        </label>
+        <button
+          className="primary"
+          disabled={busy != null}
+          onClick={() => void download("md")}
+        >
+          <Download size={16} />
+          {busy === "md" ? "Preparing…" : "Readable report (.md)"}
+        </button>
+        <button
+          className="secondary"
+          disabled={busy != null}
+          onClick={() => void download("json")}
+        >
+          <Download size={16} />
+          {busy === "json" ? "Preparing…" : "Structured data (.json)"}
+        </button>
+      </div>
+      {month === currentMonth && (
+        <p className="report-note">
+          This month is still in progress: the report covers days up to today
+          and future days are not counted as gaps.
+        </p>
+      )}
+    </section>
   );
 }
 
@@ -3018,7 +3399,7 @@ function SettingsPage({
     maintenance: data.profile.maintenance_calorie_target?.toString() ?? "",
     deficit: data.profile.daily_deficit_target?.toString() ?? "",
     maintenanceIncludesExercise:
-      data.profile.maintenance_includes_exercise ?? false,
+      data.profile.maintenance_includes_exercise !== false,
     protein: data.profile.protein_target_g?.toString() ?? "",
     carbs: data.profile.carb_target_g?.toString() ?? "",
     fat: data.profile.fat_target_g?.toString() ?? "",
@@ -3051,6 +3432,7 @@ function SettingsPage({
   const score = data.profile.activity_scoring ?? DEFAULT_SCORING;
   const saveProfile = async (event: React.FormEvent) => {
     event.preventDefault();
+    if (busy) return;
     const validateTarget = (
       value: string,
       label: string,
@@ -3059,9 +3441,9 @@ function SettingsPage({
     ) => {
       if (!value) return null;
       const parsed = Number(value);
-      return Number.isFinite(parsed) && parsed >= min && parsed <= max
+      return Number.isInteger(parsed) && parsed >= min && parsed <= max
         ? null
-        : `${label} must be between ${min.toLocaleString()} and ${max.toLocaleString()}.`;
+        : `${label} must be a whole number between ${min.toLocaleString()} and ${max.toLocaleString()}.`;
     };
     const targetError =
       validateTarget(profileForm.calories, "Daily intake target", 1, 20000) ??
@@ -3072,8 +3454,26 @@ function SettingsPage({
         20000,
       ) ??
       validateTarget(profileForm.maintenance, "Maintenance calories", 800, 15000) ??
-      validateTarget(profileForm.deficit, "Daily deficit goal", 1, 5000);
+      validateTarget(
+        profileForm.deficit,
+        "Daily balance target (negative = surplus)",
+        -5000,
+        5000,
+      );
     if (targetError) return inform("error", targetError);
+    // The calorie-ring columns only exist once 20261029_calorie_tracking.sql has been
+    // applied. Without them, saving would fail for every goal, so say so up front.
+    const calorieColumnsExist = "maintenance_calorie_target" in data.profile;
+    const enteredCalorieGoals = [
+      profileForm.exerciseCalories,
+      profileForm.maintenance,
+      profileForm.deficit,
+    ].some(Boolean);
+    if (!calorieColumnsExist && enteredCalorieGoals)
+      return inform(
+        "error",
+        `The exercise, maintenance and balance goals need a database update. Run ${MIGRATIONS.calories} in the Supabase SQL editor, then reload.`,
+      );
     setBusy(true);
     const { error } = await supabase!
       .from("profiles")
@@ -3088,17 +3488,21 @@ function SettingsPage({
         daily_calorie_target: profileForm.calories
           ? Number(profileForm.calories)
           : null,
-        daily_exercise_calorie_goal: profileForm.exerciseCalories
-          ? Number(profileForm.exerciseCalories)
-          : null,
-        maintenance_calorie_target: profileForm.maintenance
-          ? Number(profileForm.maintenance)
-          : null,
-        daily_deficit_target: profileForm.deficit
-          ? Number(profileForm.deficit)
-          : null,
-        maintenance_includes_exercise:
-          profileForm.maintenanceIncludesExercise,
+        ...(calorieColumnsExist
+          ? {
+              daily_exercise_calorie_goal: profileForm.exerciseCalories
+                ? Number(profileForm.exerciseCalories)
+                : null,
+              maintenance_calorie_target: profileForm.maintenance
+                ? Number(profileForm.maintenance)
+                : null,
+              daily_deficit_target: profileForm.deficit
+                ? Number(profileForm.deficit)
+                : null,
+              maintenance_includes_exercise:
+                profileForm.maintenanceIncludesExercise,
+            }
+          : {}),
         protein_target_g: profileForm.protein
           ? Number(profileForm.protein)
           : null,
@@ -3293,6 +3697,7 @@ function SettingsPage({
       profile: data.profile,
       weights: data.weights,
       food_entries: data.foods,
+      calorie_intake_entries: data.quickEntries,
       cardio_sessions: data.cardio,
       gym_profiles: data.gyms,
       equipment: data.equipment,
@@ -3313,6 +3718,7 @@ function SettingsPage({
         toCSV([
           ...data.weights,
           ...data.foods,
+          ...data.quickEntries,
           ...data.cardio,
           ...data.workouts,
           ...data.sets,
@@ -3410,12 +3816,13 @@ function SettingsPage({
             />
           </label>
           <label>
-            Daily deficit goal (kcal)
+            Daily balance target (kcal) <span className="optional">+ deficit, − surplus</span>
             <input
               inputMode="numeric"
               value={profileForm.deficit}
               onChange={(e) =>
                 setProfileForm({ ...profileForm, deficit: e.target.value })
+              }
             />
           </label>
           <label className="goal-checkbox">

@@ -130,3 +130,68 @@
   .auth-card, .setup-card { padding: 27px 22px; }
   .toast { top: calc(12px + env(safe-area-inset-top)); left: 15px; right: 15px; max-width: none; }
 }
+
+/* ===== Calorie rings, balance and monthly report =====================================
+   Layout follows the dashboard's own width (container queries), not the viewport, so it
+   behaves the same with the desktop sidebar, the compact drawer and on a phone.
+   3 columns >= 900px, 2 columns >= 560px, 1 column below. No horizontal page overflow. */
+.calorie-dashboard { container-type: inline-size; container-name: calories; margin: 18px 0; min-width: 0; }
+.calorie-heading { margin-bottom: 14px; }
+.calorie-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; }
+@container calories (min-width: 560px) {
+  .calorie-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .calorie-card:nth-child(3) { grid-column: 1 / -1; }
+}
+@container calories (min-width: 900px) {
+  .calorie-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .calorie-card:nth-child(3) { grid-column: auto; }
+}
+.calorie-card { background: var(--surface); border: 1px solid var(--line); border-radius: 15px; padding: 18px; display: flex; flex-direction: column; gap: 12px; min-width: 0; box-shadow: 0 4px 12px #30363306; }
+.calorie-card-title { display: flex; align-items: center; gap: 11px; }
+.calorie-card-title h3 { margin: 0; font-size: 16px; letter-spacing: -.02em; }
+.calorie-card-title .eyebrow { margin: 0 0 3px; }
+.calorie-ring-wrap { position: relative; width: min(100%, 190px); aspect-ratio: 1; margin: 2px auto; }
+.calorie-ring { width: 100%; height: 100%; display: block; }
+.calorie-ring-track { fill: none; stroke: #ebebe7; stroke-width: 11; }
+.calorie-ring-progress { fill: none; stroke-width: 11; stroke-linecap: round; transition: stroke-dashoffset .45s ease, stroke .3s ease; }
+.calorie-ring-value { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; padding: 0 22%; pointer-events: none; }
+.calorie-ring-value strong { font-size: clamp(22px, 7cqi, 30px); letter-spacing: -.04em; line-height: 1.05; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.calorie-ring-value span { font-size: 11px; color: var(--muted); line-height: 1.25; margin-top: 3px; }
+.calorie-ring-value em { font-style: normal; font-size: 12px; font-weight: 800; color: #4a5a4d; margin-top: 4px; }
+.calorie-facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 12px; margin: 0; }
+.calorie-facts div { min-width: 0; }
+.calorie-facts dt { font-size: 10px; text-transform: uppercase; letter-spacing: .08em; color: #858b86; font-weight: 800; }
+.calorie-facts dd { margin: 2px 0 0; font-size: 13px; font-weight: 650; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.goal-line { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; margin: 0; font-size: 12px; color: #5a615c; }
+.goal-line .plain-button { padding: 6px 8px; min-height: 36px; margin-left: auto; }
+.goal-editor { display: grid; gap: 10px; padding: 12px; background: #f6f8f6; border-radius: 12px; }
+.goal-editor label { display: grid; gap: 5px; font-size: 12px; font-weight: 700; color: #555c57; }
+.goal-radio { border: 0; margin: 0; padding: 0; display: grid; gap: 7px; font-size: 12px; }
+.goal-radio legend { font-weight: 700; color: #555c57; padding: 0; margin-bottom: 4px; }
+.goal-radio label { display: flex; align-items: flex-start; gap: 8px; font-weight: 500; }
+.goal-radio input[type="radio"] { width: auto; min-height: 0; margin-top: 2px; flex: 0 0 auto; }
+.calorie-entry-form { display: grid; gap: 10px; border-top: 1px solid var(--line); padding-top: 12px; }
+.calorie-entry-form label { display: grid; gap: 5px; font-size: 12px; font-weight: 700; color: #555c57; }
+.calorie-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.calorie-actions button { flex: 1 1 130px; min-height: 44px; }
+.calorie-note { margin: 0; font-size: 11.5px; line-height: 1.45; color: #6b726d; }
+.calorie-error { margin: 0; font-size: 12px; line-height: 1.4; color: #994d46; background: #fff1ef; border-radius: 8px; padding: 8px 10px; }
+.calorie-entries { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; font-size: 12px; }
+.calorie-entries li { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 0; border-top: 1px solid #efefeb; }
+.calorie-entries li span { min-width: 0; overflow-wrap: anywhere; }
+.calorie-entries small { color: #8d938e; margin-left: 4px; }
+.calorie-entries .plain-button { min-height: 36px; flex: 0 0 auto; color: #994d46; }
+
+.report-card { display: grid; gap: 12px; }
+.report-controls { display: flex; flex-wrap: wrap; align-items: end; gap: 10px; }
+.report-controls label { display: grid; gap: 5px; font-size: 12px; font-weight: 700; color: #555c57; min-width: 120px; flex: 1 1 120px; }
+.report-controls .primary, .report-controls .secondary { min-height: 44px; flex: 1 1 150px; }
+.report-note { margin: 0; font-size: 12px; color: #6b726d; line-height: 1.5; }
+
+.migration-banner { margin: 0 0 14px; padding: 12px 14px; border-radius: 12px; background: #fff7e8; border: 1px solid #f0dcae; color: #7a5a1a; font-size: 13px; line-height: 1.5; }
+.migration-banner strong { display: block; margin-bottom: 3px; }
+.migration-banner code { font-size: 12px; overflow-wrap: anywhere; }
+
+.workout-banner { margin: 0 0 14px; padding: 14px 16px; border-radius: 12px; background: #fff7e8; border: 1px solid #f0dcae; color: #6e5217; font-size: 13px; line-height: 1.5; }
+.workout-banner strong { display: block; margin-bottom: 3px; }
+@media (prefers-reduced-motion: reduce) { .calorie-ring-progress { transition: none; } }

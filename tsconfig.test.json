@@ -1,0 +1,29 @@
+{
+  "compilerOptions": {
+    "target": "es2023",
+    "lib": ["ES2023", "DOM"],
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "types": ["node"],
+    "skipLibCheck": true,
+    "strict": true,
+    "verbatimModuleSyntax": true,
+    "erasableSyntaxOnly": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "outDir": ".test-build",
+    "rootDir": "."
+  },
+  "include": [
+    "src/types.ts",
+    "src/lib.ts",
+    "src/calories.ts",
+    "src/workoutLifecycle.ts",
+    "src/monthlyReport.ts",
+    "src/midnight.ts",
+    "src/intake.ts",
+    "src/dbErrors.ts",
+    "tests"
+  ]
+}

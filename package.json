@@ -8,7 +8,8 @@
     "build": "tsc -b && vite build",
     "typecheck": "tsc -b",
     "lint": "oxlint",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "tsc -p tsconfig.test.json && node --import ./scripts/register-extensionless.mjs --test --test-reporter=spec \".test-build/tests/*.test.js\""
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.118.0",
